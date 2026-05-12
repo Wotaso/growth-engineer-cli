@@ -16,44 +16,44 @@ import { applyOpenClawSecretRefs, loadOpenClawGrowthSecrets } from './openclaw-g
 const DEFAULT_CONFIG_PATH = 'data/openclaw-growth-engineer/config.json';
 const DEFAULT_STATE_PATH = 'data/openclaw-growth-engineer/state.json';
 const DEFAULT_RUNTIME_DIR = 'data/openclaw-growth-engineer/runtime';
-const DEFAULT_CONNECTOR_HEALTH_INTERVAL_MINUTES = 720;
+const DEFAULT_CONNECTOR_HEALTH_INTERVAL_MINUTES = 360;
 const SELF_UPDATE_INTERVAL_MS = 24 * 60 * 60 * 1000;
 const DEFAULT_CADENCES = [
   {
     key: 'daily',
-    title: 'Daily production guardrail',
+    title: 'Daily Sentry and production guardrail',
     intervalDays: 1,
     criticalOnly: true,
-    focusAreas: ['crash', 'conversion', 'paywall'],
-    sourcePriorities: ['sentry', 'glitchtip', 'analytics', 'asc_cli', 'revenuecat'],
+    focusAreas: ['sentry_errors', 'crash', 'onboarding', 'conversion', 'paywall', 'purchase'],
+    sourcePriorities: ['sentry', 'glitchtip', 'analytics', 'revenuecat', 'asc_cli', 'feedback', 'github'],
     objective:
-      'Find only critical production blockers and business anomalies: production crashes/errors, very low users, conversion, purchases, or other urgent drops.',
+      'Analyze every configured project for critical production blockers: Sentry/GlitchTip errors, crashes, onboarding or purchase drop-offs, zero-conversion days, missing buyers, very low users, and other silent business anomalies.',
     instructions:
-      'Do root-cause analysis across Sentry/GlitchTip, AnalyticsCLI, RevenueCat, ASC, feedback, release metadata, memory/state, and recent code changes. Produce the exact fix or next debugging step; do not invent generic growth ideas.',
+      'Compare against recent baselines across Sentry/GlitchTip, AnalyticsCLI, RevenueCat, ASC, feedback, release metadata, memory/state, and recent code changes. If the finding is critical, produce the exact fix or next debugging step and prefer a GitHub issue or draft PR when GitHub write access is configured; otherwise hand off via OpenClaw chat. Do not invent generic growth ideas.',
   },
   {
     key: 'weekly',
-    title: 'Weekly conversion, traffic, and revenue review',
+    title: 'Weekly executive product and growth summary',
     intervalDays: 7,
     criticalOnly: false,
-    focusAreas: ['conversion', 'paywall', 'onboarding', 'marketing', 'retention'],
-    sourcePriorities: ['analytics', 'revenuecat', 'asc_cli', 'feedback', 'sentry'],
+    focusAreas: ['conversion', 'paywall', 'onboarding', 'marketing', 'retention', 'stability'],
+    sourcePriorities: ['analytics', 'revenuecat', 'asc_cli', 'feedback', 'sentry', 'github'],
     objective:
-      'Review total conversion, traffic quality, activation, retention movement, RevenueCat trials/subscriptions/revenue/churn, source mix, reviews, releases, and stability.',
+      'Create an executive summary across all configured projects, connectors, recent releases, code changes, revenue, activation, retention, reviews, and production stability.',
     instructions:
-      'Choose one to three high-confidence growth bets with evidence, expected KPI movement, likely code/store surfaces, and verification plan. Kill or adjust experiments without signal.',
+      'Choose one to three high-confidence improvements with evidence, expected KPI movement, likely code/store surfaces, owner-ready next steps, and verification plan. Create GitHub issues or draft PR proposals only when the evidence is specific enough. Kill or adjust experiments without signal.',
   },
   {
     key: 'monthly',
-    title: 'Monthly business and product strategy review',
+    title: 'Monthly deep product, business, and code review',
     intervalDays: 30,
     criticalOnly: false,
-    focusAreas: ['conversion', 'paywall', 'retention', 'marketing', 'onboarding'],
-    sourcePriorities: ['analytics', 'revenuecat', 'asc_cli', 'feedback', 'sentry'],
+    focusAreas: ['conversion', 'paywall', 'retention', 'marketing', 'onboarding', 'codebase'],
+    sourcePriorities: ['analytics', 'revenuecat', 'asc_cli', 'feedback', 'sentry', 'github'],
     objective:
-      'Compare month-over-month MRR, trial conversion, churn, acquisition channel quality, store/listing conversion, retention, review themes, feature usage, and crash totals.',
+      'Compare all configured projects month-over-month: MRR, trial conversion, churn, acquisition channel quality, store/listing conversion, retention, review themes, feature usage, crash totals, and codebase changes.',
     instructions:
-      'Decide what should be built, changed, or deleted next. Explain why the change is likely to move revenue, activation, retention, or acquisition quality.',
+      'Decide what should be built, changed, deleted, or instrumented next. Tie conclusions to connector data plus codebase evidence and explain why each recommendation should move revenue, activation, retention, stability, or acquisition quality.',
   },
   {
     key: 'quarterly',
@@ -61,9 +61,9 @@ const DEFAULT_CADENCES = [
     intervalDays: 91,
     criticalOnly: false,
     focusAreas: ['marketing', 'paywall', 'retention', 'conversion', 'onboarding'],
-    sourcePriorities: ['analytics', 'revenuecat', 'asc_cli', 'feedback'],
+    sourcePriorities: ['analytics', 'revenuecat', 'asc_cli', 'feedback', 'github', 'sentry'],
     objective:
-      'Revisit positioning, pricing/packaging, onboarding architecture, roadmap assumptions, tracking quality, and major funnel bets from the last three months.',
+      'Revisit positioning, pricing/packaging, onboarding architecture, roadmap assumptions, tracking quality, codebase constraints, and major funnel bets across every configured project.',
     instructions:
       'Find structural constraints and durable opportunities, not small UI tweaks. Tie recommendations to cohort behavior, monetization, reviews, channel quality, and shipped changes.',
   },
@@ -75,7 +75,7 @@ const DEFAULT_CADENCES = [
     focusAreas: ['retention', 'conversion', 'paywall', 'marketing', 'general'],
     sourcePriorities: ['analytics', 'revenuecat', 'asc_cli', 'feedback', 'sentry'],
     objective:
-      'Audit connector coverage, SDK instrumentation, event taxonomy, data reliability, data memory, growth loops, and whether product/marketing strategy still matches the best users.',
+      'Audit connector coverage, SDK instrumentation, event taxonomy, data reliability, data memory, growth loops, and whether product/code strategy still matches the best users across configured projects.',
     instructions:
       'Prioritize measurement fixes and system changes that make future analysis more trustworthy. Identify stale events, missing attribution, weak identity, broken feedback loops, and misleading dashboards.',
   },
@@ -87,7 +87,7 @@ const DEFAULT_CADENCES = [
     focusAreas: ['marketing', 'retention', 'paywall', 'conversion', 'general'],
     sourcePriorities: ['analytics', 'revenuecat', 'asc_cli', 'feedback', 'sentry'],
     objective:
-      'Reset strategy from evidence: market/channel fit, monetization model, retention ceiling, product scope, and whether to double down, reposition, rebuild, or sunset major surfaces/features.',
+      'Reset strategy from evidence across every configured project: market/channel fit, monetization model, retention ceiling, product scope, and whether to double down, reposition, rebuild, or sunset major surfaces/features.',
     instructions:
       'Use the full year of memory, releases, revenue, acquisition, reviews, code changes, and cohort behavior. Produce a strategic operating plan with specific experiments and stop-doing decisions.',
   },

@@ -110,7 +110,7 @@ const cadenceSchema = z
 const scheduleSchema = z
   .object({
     intervalMinutes: z.number().int().min(1).default(1440),
-    connectorHealthCheckIntervalMinutes: z.number().int().min(1).default(720),
+    connectorHealthCheckIntervalMinutes: z.number().int().min(1).default(360),
     skipIfNoDataChange: z.boolean().default(true),
     skipIfIssueSetUnchanged: z.boolean().default(true),
     cadences: z.array(cadenceSchema).default([]),

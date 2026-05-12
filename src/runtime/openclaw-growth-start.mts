@@ -480,7 +480,7 @@ function getHeartbeatInterval(config) {
   const healthInterval = Number(config?.schedule?.connectorHealthCheckIntervalMinutes);
   return Math.min(
     Number.isFinite(scheduleInterval) && scheduleInterval > 0 ? scheduleInterval : 1440,
-    Number.isFinite(healthInterval) && healthInterval > 0 ? healthInterval : 720,
+    Number.isFinite(healthInterval) && healthInterval > 0 ? healthInterval : 360,
   );
 }
 
