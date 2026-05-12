@@ -165,6 +165,15 @@ function nodeRuntimeScriptCommand(scriptName) {
   return `node ${quote(resolveRuntimeScriptPath(scriptName))}`;
 }
 
+function replaceLegacyRuntimeScriptCommand(command) {
+  const trimmed = String(command || '').trim();
+  if (!trimmed) return trimmed;
+  return trimmed.replace(
+    /^node\s+scripts\/(export-analytics-summary\.mjs|export-revenuecat-summary\.mjs|export-sentry-summary\.mjs|export-asc-summary\.mjs|openclaw-growth-engineer\.mjs|openclaw-growth-status\.mjs|openclaw-growth-preflight\.mjs|openclaw-growth-runner\.mjs)(?=\s|$)/,
+    (_match, scriptName) => nodeRuntimeScriptCommand(scriptName),
+  );
+}
+
 async function readJson(filePath): Promise<any> {
   const raw = await fs.readFile(filePath, 'utf8');
   return JSON.parse(raw);
@@ -1273,7 +1282,11 @@ async function resolveSourcePayloadWithCursor(sourceConfig, sourceName, cursorSt
     if (!sourceConfig.command) {
       throw new Error(`Source "${sourceName}" has mode=command but no command configured.`);
     }
-    const resolvedCommand = resolveCursorAwareCommand(sourceConfig.command, sourceConfig, cursorState);
+    const resolvedCommand = resolveCursorAwareCommand(
+      replaceLegacyRuntimeScriptCommand(sourceConfig.command),
+      sourceConfig,
+      cursorState,
+    );
     const result = await runShellCommand(String(resolvedCommand), 120_000, { cwd: commandCwd });
     if (!result.ok) {
       throw new Error(`Source "${sourceName}" command failed: ${result.stderr || `exit ${result.code}`}`);

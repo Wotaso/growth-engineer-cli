@@ -158,6 +158,67 @@ function nodeRuntimeScriptCommand(scriptName) {
   return `node ${quote(resolveRuntimeScriptPath(scriptName))}`;
 }
 
+function getRuntimeSourceCommand(sourceName) {
+  const normalized = String(sourceName || '').trim().toLowerCase();
+  if (normalized === 'analytics' || normalized === 'analyticscli') {
+    return nodeRuntimeScriptCommand('export-analytics-summary.mjs');
+  }
+  if (normalized === 'revenuecat' || normalized === 'revenue-cat') {
+    return nodeRuntimeScriptCommand('export-revenuecat-summary.mjs');
+  }
+  if (normalized === 'sentry' || normalized === 'glitchtip') {
+    return nodeRuntimeScriptCommand('export-sentry-summary.mjs');
+  }
+  if (['asc', 'asc-cli', 'app-store-connect', 'app_store_connect'].includes(normalized)) {
+    return nodeRuntimeScriptCommand('export-asc-summary.mjs');
+  }
+  return getDefaultSourceCommand(sourceName);
+}
+
+function replaceLegacyRuntimeScriptCommand(command) {
+  const trimmed = String(command || '').trim();
+  if (!trimmed) return trimmed;
+  return trimmed.replace(
+    /^node\s+scripts\/(export-analytics-summary\.mjs|export-revenuecat-summary\.mjs|export-sentry-summary\.mjs|export-asc-summary\.mjs|openclaw-growth-start\.mjs|openclaw-growth-status\.mjs|openclaw-growth-preflight\.mjs|openclaw-growth-runner\.mjs|openclaw-growth-engineer\.mjs)(?=\s|$)/,
+    (_match, scriptName) => nodeRuntimeScriptCommand(scriptName),
+  );
+}
+
+function normalizeSourceCommand(sourceName, source) {
+  return replaceLegacyRuntimeScriptCommand(source?.command || '') || getRuntimeSourceCommand(sourceName);
+}
+
+function migrateRuntimeSourceCommands(config) {
+  if (!config || typeof config !== 'object') return config;
+  const sources = config.sources && typeof config.sources === 'object' ? config.sources : {};
+  const nextSources = { ...sources };
+  for (const sourceName of ['analytics', 'revenuecat', 'sentry']) {
+    if (nextSources[sourceName]?.mode === 'command') {
+      nextSources[sourceName] = {
+        ...nextSources[sourceName],
+        command: normalizeSourceCommand(sourceName, nextSources[sourceName]),
+      };
+    }
+  }
+  if (Array.isArray(nextSources.extra)) {
+    nextSources.extra = nextSources.extra.map((source) => {
+      if (!source || source.mode !== 'command') return source;
+      const service = String(source.service || source.key || '').toLowerCase();
+      const sourceName = ['asc', 'asc-cli', 'app-store-connect', 'app_store_connect'].includes(service)
+        ? 'asc'
+        : service;
+      return {
+        ...source,
+        command: normalizeSourceCommand(sourceName, source),
+      };
+    });
+  }
+  return {
+    ...config,
+    sources: nextSources,
+  };
+}
+
 function truncate(value, max = 240) {
   const text = String(value || '');
   if (text.length <= max) return text;
@@ -883,17 +944,17 @@ async function enableConnectorConfig(configPath, connectors) {
     sources: {
       ...(config.sources || {}),
       analytics: connectors.includes('analytics')
-        ? { ...(config.sources?.analytics || {}), enabled: true, mode: 'command', command: config.sources?.analytics?.command || getDefaultSourceCommand('analytics') }
+        ? { ...(config.sources?.analytics || {}), enabled: true, mode: 'command', command: normalizeSourceCommand('analytics', config.sources?.analytics) }
         : config.sources?.analytics,
       revenuecat: connectors.includes('revenuecat')
-        ? { ...(config.sources?.revenuecat || {}), enabled: true, mode: 'command', command: getDefaultSourceCommand('revenuecat') }
+        ? { ...(config.sources?.revenuecat || {}), enabled: true, mode: 'command', command: normalizeSourceCommand('revenuecat', config.sources?.revenuecat) }
         : config.sources?.revenuecat,
       sentry: connectors.includes('sentry')
-        ? { ...(config.sources?.sentry || {}), enabled: true, mode: 'command', command: getDefaultSourceCommand('sentry') }
+        ? { ...(config.sources?.sentry || {}), enabled: true, mode: 'command', command: normalizeSourceCommand('sentry', config.sources?.sentry) }
         : config.sources?.sentry,
       extra: extra.map((source) =>
         connectors.includes('asc') && source?.service === 'asc-cli'
-          ? { ...source, enabled: true, mode: 'command', command: source.command || getDefaultSourceCommand('asc') }
+          ? { ...source, enabled: true, mode: 'command', command: normalizeSourceCommand('asc', source) }
           : source,
       ),
     },
@@ -943,7 +1004,9 @@ async function detectGitHubRepo() {
 
 async function ensureConfig(configPath) {
   if (await fileExists(configPath)) {
-    const config = await readJson(configPath);
+    const originalConfig = await readJson(configPath);
+    const config = migrateRuntimeSourceCommands(originalConfig);
+    let changed = JSON.stringify(originalConfig.sources || {}) !== JSON.stringify(config.sources || {});
     if (!isConfiguredGitHubRepo(config?.project?.githubRepo)) {
       const detectedRepo = await detectGitHubRepo();
       if (detectedRepo) {
@@ -951,13 +1014,16 @@ async function ensureConfig(configPath) {
           ...(config.project || {}),
           githubRepo: detectedRepo,
         };
-        await writeJson(configPath, config);
-        return {
-          created: false,
-          configPath,
-          githubRepo: detectedRepo,
-        };
+        changed = true;
       }
+    }
+    if (changed) {
+      await writeJson(configPath, config);
+      return {
+        created: false,
+        configPath,
+        githubRepo: config.project?.githubRepo || null,
+      };
     }
     return {
       created: false,
@@ -984,19 +1050,19 @@ async function ensureConfig(configPath) {
       analytics: {
         enabled: true,
         mode: 'command',
-        command: getDefaultSourceCommand('analytics'),
+        command: getRuntimeSourceCommand('analytics'),
       },
       revenuecat: {
         ...(template.sources?.revenuecat || {}),
         enabled: false,
         mode: 'command',
-        command: getDefaultSourceCommand('revenuecat'),
+        command: getRuntimeSourceCommand('revenuecat'),
       },
       sentry: {
         ...(template.sources?.sentry || {}),
         enabled: false,
         mode: 'command',
-        command: getDefaultSourceCommand('sentry'),
+        command: getRuntimeSourceCommand('sentry'),
       },
       feedback: {
         ...(template.sources?.feedback || {}),
