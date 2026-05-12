@@ -371,7 +371,7 @@ function orderConnectors(keys: ConnectorKey[]): ConnectorKey[] {
 
 function printConnectorIntro() {
   process.stdout.write(`\n${ANSI.bold}OpenClaw connector setup${ANSI.reset}\n`);
-  process.stdout.write(`${ANSI.dim}Secrets stay local on this host. Do not paste them into any chat or social channel.${ANSI.reset}\n\n`);
+  process.stdout.write(`${ANSI.dim}You can configure connector secrets here. API keys stay in this host's local secrets file, not in chat or config JSON.${ANSI.reset}\n\n`);
 }
 
 async function askMenuChoice<T extends string>(
@@ -3200,7 +3200,7 @@ async function askWizardGoal(rl) {
 
 function printWizardHeader() {
   process.stdout.write('OpenClaw Growth Engineer - Setup Wizard\n');
-  process.stdout.write('This wizard writes non-secret config only. Connector secrets stay in the local secrets file.\n\n');
+  process.stdout.write('This wizard can configure connector secrets. Normal config is written to config JSON; API keys stay in the local chmod 600 secrets file.\n\n');
 }
 
 async function buildDefaultWizardConfig() {
