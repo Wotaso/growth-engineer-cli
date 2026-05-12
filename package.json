@@ -1,0 +1,38 @@
+{
+  "name": "@analyticscli/growth-engineer",
+  "version": "0.1.0-preview.0",
+  "description": "Growth Engineer CLI for connector setup, scheduling, health checks, and OpenClaw-compatible growth runs.",
+  "license": "MIT",
+  "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Wotaso/growth-engineer-cli.git"
+  },
+  "homepage": "https://github.com/Wotaso/growth-engineer-cli#readme",
+  "bugs": {
+    "url": "https://github.com/Wotaso/growth-engineer-cli/issues"
+  },
+  "files": [
+    "dist",
+    "templates"
+  ],
+  "bin": {
+    "growth-engineer": "dist/index.js"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json && mkdir -p dist/runtime && cp src/runtime/*.py dist/runtime/",
+    "prepack": "npm run build",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "commander": "^13.1.0",
+    "zod": "^3.24.2"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.10",
+    "typescript": "^5.8.2"
+  }
+}
