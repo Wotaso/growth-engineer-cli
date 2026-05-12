@@ -2859,6 +2859,169 @@ async function maybeSelfUpdateFromClawHub(args) {
   process.exit(code ?? 0);
 }
 
+async function runConnectorSetupSteps({
+  rl,
+  args,
+  selected,
+  healthByConnector,
+  allowIsolationPrompt = true,
+}: {
+  rl: any;
+  args: any;
+  selected: ConnectorKey[];
+  healthByConnector: Record<string, any>;
+  allowIsolationPrompt?: boolean;
+}) {
+  clearTerminal();
+  printConnectorIntro();
+  process.stdout.write(`${ANSI.bold}Selected connectors${ANSI.reset}\n`);
+  for (const key of selected) {
+    process.stdout.write(`  - ${connectorLabel(key)}\n`);
+  }
+  process.stdout.write('\n');
+
+  const secrets: Record<string, string> = {};
+  let sentryAccounts: any[] = [];
+  if (selected.includes('analytics')) {
+    let forceFreshAnalyticsToken = shouldForceFreshAnalyticsToken(healthByConnector);
+    while (true) {
+      clearTerminal();
+      await guideAnalyticsConnector(rl, secrets, { forceFresh: forceFreshAnalyticsToken });
+      const check = await runImmediateConnectorHealthCheck({
+        rl,
+        configPath: args.config,
+        connector: 'analytics',
+        secrets,
+      });
+      if (!check.retry) break;
+      forceFreshAnalyticsToken = true;
+    }
+  }
+  if (selected.includes('github')) {
+    while (true) {
+      clearTerminal();
+      await guideGitHubConnector(rl, secrets);
+      const check = await runImmediateConnectorHealthCheck({
+        rl,
+        configPath: args.config,
+        connector: 'github',
+        secrets,
+      });
+      if (!check.retry) break;
+    }
+  }
+  if (selected.includes('revenuecat')) {
+    while (true) {
+      clearTerminal();
+      await guideRevenueCatConnector(rl, secrets);
+      const check = await runImmediateConnectorHealthCheck({
+        rl,
+        configPath: args.config,
+        connector: 'revenuecat',
+        secrets,
+      });
+      if (!check.retry) break;
+    }
+  }
+  if (selected.includes('sentry')) {
+    while (true) {
+      clearTerminal();
+      sentryAccounts = await guideSentryConnector(rl, secrets);
+      const check = await runImmediateConnectorHealthCheck({
+        rl,
+        configPath: args.config,
+        connector: 'sentry',
+        secrets,
+        sentryAccounts,
+      });
+      if (!check.retry) break;
+    }
+  }
+  if (selected.includes('asc')) {
+    while (true) {
+      clearTerminal();
+      await guideAscConnector(rl, secrets);
+      const check = await runImmediateConnectorHealthCheck({
+        rl,
+        configPath: args.config,
+        connector: 'asc',
+        secrets,
+      });
+      if (!check.retry) break;
+    }
+  }
+
+  const secretsFile = resolveSecretsFile();
+  const wroteSecrets = Object.keys(secrets).length > 0;
+  clearTerminal();
+  if (wroteSecrets) {
+    await writeSecretsFile(secretsFile, secrets);
+    process.stdout.write(`\nSaved local secrets to ${secretsFile} with chmod 600.\n`);
+  } else {
+    process.stdout.write('\nNo new secrets were written.\n');
+  }
+
+  if (sentryAccounts.length > 0 && await upsertSentryAccountsConfig(args.config, sentryAccounts)) {
+    process.stdout.write(`Configured ${sentryAccounts.length} Sentry-compatible account(s) in ${args.config}.\n`);
+  }
+
+  const env = {
+    ...process.env,
+    ...secrets,
+  };
+  const command = `node scripts/openclaw-growth-start.mjs --config ${quote(args.config)} --setup-only --connectors ${quote(selected.join(','))}`;
+  let setupResult = await runSetupCommandWithProgress(command, env, selected, 'Testing connector setup...');
+  let setupPayload = parseJsonFromStdout(setupResult.stdout);
+
+  if (sentryAccounts.length > 0 && await upsertSentryAccountsConfig(args.config, sentryAccounts)) {
+    process.stdout.write(`Sentry-compatible account config is up to date in ${args.config}.\n`);
+  }
+
+  if (selected.includes('asc')) {
+    try {
+      const ascWebAuthChanged = await ensureAscWebAnalyticsAuth(rl, secrets);
+      if (ascWebAuthChanged) {
+        setupResult = await runSetupCommandWithProgress(
+          command,
+          env,
+          selected,
+          'Retesting connector setup after ASC web analytics login...',
+        );
+        setupPayload = parseJsonFromStdout(setupResult.stdout);
+      }
+    } catch (error) {
+      process.stdout.write(
+        `ASC web analytics still needs attention: ${error instanceof Error ? error.message : String(error)}\n`,
+      );
+    }
+  }
+
+  if (setupResult.ok && setupPayload?.ok !== false) {
+    printSetupSuccess(setupPayload);
+    if (wroteSecrets) {
+      process.stdout.write('Future OpenClaw Growth commands load this secrets file automatically.\n');
+    }
+    const configureIsolation = allowIsolationPrompt && ENABLE_ISOLATED_SECRET_RUNNER_WIZARD && await askYesNo(
+      rl,
+      'Generate an isolated secret runner so OpenClaw can run health checks without reading API keys?',
+      true,
+    );
+    if (configureIsolation) {
+      const config = await loadEditableConfig(args.config);
+      const secretAccess = await askSecretAccessModel(rl, path.resolve(args.config), config);
+      await writeJsonFile(path.resolve(args.config), config);
+      const manifestPath = await writeOpenClawJobManifest(path.resolve(args.config), config);
+      process.stdout.write(`Saved OpenClaw job manifest: ${manifestPath}\n`);
+      printSecretRunnerKitInstructions(secretAccess.kit);
+    }
+    return true;
+  }
+
+  printSetupFailure({ result: setupResult, payload: setupPayload, command });
+  process.exitCode = 1;
+  return false;
+}
+
 async function runConnectorSetupWizard(args) {
   if (!process.stdin.isTTY || !process.stdout.isTTY) {
     throw new Error('Connector wizard requires an interactive terminal.');
@@ -2884,153 +3047,7 @@ async function runConnectorSetupWizard(args) {
       throw new Error('No supported connectors selected. Use analytics, github, revenuecat, sentry, asc, or all.');
     }
 
-    clearTerminal();
-    printConnectorIntro();
-    process.stdout.write(`${ANSI.bold}Selected connectors${ANSI.reset}\n`);
-    for (const key of selected) {
-      process.stdout.write(`  - ${connectorLabel(key)}\n`);
-    }
-    process.stdout.write('\n');
-
-    const secrets: Record<string, string> = {};
-    let sentryAccounts: any[] = [];
-    if (selected.includes('analytics')) {
-      let forceFreshAnalyticsToken = shouldForceFreshAnalyticsToken(healthByConnector);
-      while (true) {
-        clearTerminal();
-        await guideAnalyticsConnector(rl, secrets, { forceFresh: forceFreshAnalyticsToken });
-        const check = await runImmediateConnectorHealthCheck({
-          rl,
-          configPath: args.config,
-          connector: 'analytics',
-          secrets,
-        });
-        if (!check.retry) break;
-        forceFreshAnalyticsToken = true;
-      }
-    }
-    if (selected.includes('github')) {
-      while (true) {
-        clearTerminal();
-        await guideGitHubConnector(rl, secrets);
-        const check = await runImmediateConnectorHealthCheck({
-          rl,
-          configPath: args.config,
-          connector: 'github',
-          secrets,
-        });
-        if (!check.retry) break;
-      }
-    }
-    if (selected.includes('revenuecat')) {
-      while (true) {
-        clearTerminal();
-        await guideRevenueCatConnector(rl, secrets);
-        const check = await runImmediateConnectorHealthCheck({
-          rl,
-          configPath: args.config,
-          connector: 'revenuecat',
-          secrets,
-        });
-        if (!check.retry) break;
-      }
-    }
-    if (selected.includes('sentry')) {
-      while (true) {
-        clearTerminal();
-        sentryAccounts = await guideSentryConnector(rl, secrets);
-        const check = await runImmediateConnectorHealthCheck({
-          rl,
-          configPath: args.config,
-          connector: 'sentry',
-          secrets,
-          sentryAccounts,
-        });
-        if (!check.retry) break;
-      }
-    }
-    if (selected.includes('asc')) {
-      while (true) {
-        clearTerminal();
-        await guideAscConnector(rl, secrets);
-        const check = await runImmediateConnectorHealthCheck({
-          rl,
-          configPath: args.config,
-          connector: 'asc',
-          secrets,
-        });
-        if (!check.retry) break;
-      }
-    }
-
-    const secretsFile = resolveSecretsFile();
-    const wroteSecrets = Object.keys(secrets).length > 0;
-    clearTerminal();
-    if (wroteSecrets) {
-      await writeSecretsFile(secretsFile, secrets);
-      process.stdout.write(`\nSaved local secrets to ${secretsFile} with chmod 600.\n`);
-    } else {
-      process.stdout.write('\nNo new secrets were written.\n');
-    }
-
-    if (sentryAccounts.length > 0 && await upsertSentryAccountsConfig(args.config, sentryAccounts)) {
-      process.stdout.write(`Configured ${sentryAccounts.length} Sentry-compatible account(s) in ${args.config}.\n`);
-    }
-
-    const env = {
-      ...process.env,
-      ...secrets,
-    };
-    const command = `node scripts/openclaw-growth-start.mjs --config ${quote(args.config)} --setup-only --connectors ${quote(selected.join(','))}`;
-    let setupResult = await runSetupCommandWithProgress(command, env, selected, 'Testing connector setup...');
-    let setupPayload = parseJsonFromStdout(setupResult.stdout);
-
-    if (sentryAccounts.length > 0 && await upsertSentryAccountsConfig(args.config, sentryAccounts)) {
-      process.stdout.write(`Sentry-compatible account config is up to date in ${args.config}.\n`);
-    }
-
-    if (selected.includes('asc')) {
-      try {
-        const ascWebAuthChanged = await ensureAscWebAnalyticsAuth(rl, secrets);
-        if (ascWebAuthChanged) {
-          setupResult = await runSetupCommandWithProgress(
-            command,
-            env,
-            selected,
-            'Retesting connector setup after ASC web analytics login...',
-          );
-          setupPayload = parseJsonFromStdout(setupResult.stdout);
-        }
-      } catch (error) {
-        process.stdout.write(
-          `ASC web analytics still needs attention: ${error instanceof Error ? error.message : String(error)}\n`,
-        );
-      }
-    }
-
-    if (setupResult.ok && setupPayload?.ok !== false) {
-      printSetupSuccess(setupPayload);
-      if (wroteSecrets) {
-        process.stdout.write('Future OpenClaw Growth commands load this secrets file automatically.\n');
-      }
-      const configureIsolation = ENABLE_ISOLATED_SECRET_RUNNER_WIZARD && await askYesNo(
-        rl,
-        'Generate an isolated secret runner so OpenClaw can run health checks without reading API keys?',
-        true,
-      );
-      if (configureIsolation) {
-        const config = await loadEditableConfig(args.config);
-        const secretAccess = await askSecretAccessModel(rl, path.resolve(args.config), config);
-        await writeJsonFile(path.resolve(args.config), config);
-        const manifestPath = await writeOpenClawJobManifest(path.resolve(args.config), config);
-        process.stdout.write(`Saved OpenClaw job manifest: ${manifestPath}\n`);
-        printSecretRunnerKitInstructions(secretAccess.kit);
-      }
-      return;
-    }
-
-    printSetupFailure({ result: setupResult, payload: setupPayload, command });
-    process.exitCode = 1;
+    await runConnectorSetupSteps({ rl, args, selected, healthByConnector });
   } finally {
     rl.close();
   }
@@ -3077,14 +3094,28 @@ function printCadencePlan(cadences) {
 }
 
 async function askToolUsage(rl) {
-  process.stdout.write('\nHow should OpenClaw Growth Engineer use this tool?\n');
-  process.stdout.write('  1) Production autopilot: notify, draft issues/PR handoffs, and analyze on schedule\n');
-  process.stdout.write('  2) Advisory only: analyze and write OpenClaw chat summaries, no GitHub artifacts by default\n');
-  process.stdout.write('  3) Manual reports: mostly one-off runs; keep scheduling conservative\n');
-  const answer = await ask(rl, 'Usage mode (1/2/3)', '1');
-  if (answer.trim() === '2') return 'advisory';
-  if (answer.trim() === '3') return 'manual_reports';
-  return 'production_autopilot';
+  return await askMenuChoice(rl, {
+    title: 'How should OpenClaw Growth Engineer run?',
+    subtitle: 'Use Up/Down to move, Enter to continue, or press 1-3.',
+    defaultValue: 'production_autopilot',
+    options: [
+      {
+        value: 'production_autopilot',
+        label: 'Production autopilot',
+        detail: 'Notify, draft issues/PR handoffs, and analyze on schedule.',
+      },
+      {
+        value: 'advisory',
+        label: 'Advisory only',
+        detail: 'Analyze and write OpenClaw chat summaries; no GitHub artifacts by default.',
+      },
+      {
+        value: 'manual_reports',
+        label: 'Manual reports',
+        detail: 'Mostly one-off runs with conservative scheduling.',
+      },
+    ],
+  });
 }
 
 async function askCadencePlan(rl) {
@@ -3445,24 +3476,33 @@ async function askOutputConfig(rl, config) {
     'OpenClaw chat is always enabled so the agent has a readable handoff.',
     'GitHub issues or draft PRs are optional and only run when a token plus an inferred repo are available.',
   ]);
-  process.stdout.write('  1) OpenClaw chat only, with GitHub left as runtime fallback\n');
-  process.stdout.write('  2) Auto-create GitHub issues for concrete findings\n');
-  process.stdout.write('  3) Auto-create draft PR proposals for implementation-ready fixes\n');
   const currentMode = config?.actions?.mode || config?.deliveries?.github?.mode || 'issue';
   const currentAutoCreate = Boolean(config?.actions?.autoCreateIssues || config?.actions?.autoCreatePullRequests || config?.deliveries?.github?.autoCreate);
-  const defaultChoice = currentAutoCreate ? (currentMode === 'pull_request' ? '3' : '2') : '1';
-  const outputChoice = await ask(rl, 'Output type (1/2/3)', defaultChoice);
-  const summaryOnly = outputChoice.trim() === '1';
-  const mode = outputChoice.trim() === '3' ? 'pull_request' : 'issue';
-  const autoCreate = summaryOnly
-    ? false
-    : await askYesNo(
-        rl,
-        mode === 'pull_request'
-          ? 'Automatically create draft pull requests when new findings are found?'
-          : 'Automatically create GitHub issues when new findings are found?',
-        currentAutoCreate,
-      );
+  const outputChoice = await askMenuChoice(rl, {
+    title: 'Output mode',
+    subtitle: 'Use Up/Down to move, Enter to continue, or press 1-3.',
+    defaultValue: currentAutoCreate ? (currentMode === 'pull_request' ? 'pull_request' : 'issue') : 'chat',
+    options: [
+      {
+        value: 'chat',
+        label: 'OpenClaw chat',
+        detail: 'Write readable summaries and leave GitHub as runtime fallback.',
+      },
+      {
+        value: 'issue',
+        label: 'GitHub issues',
+        detail: 'Auto-create issues for concrete findings when GitHub access allows it.',
+      },
+      {
+        value: 'pull_request',
+        label: 'Draft PR proposals',
+        detail: 'Auto-create draft PR-oriented proposal branches for implementation-ready fixes.',
+      },
+    ],
+  });
+  const summaryOnly = outputChoice === 'chat';
+  const mode = outputChoice === 'pull_request' ? 'pull_request' : 'issue';
+  const autoCreate = !summaryOnly;
 
   if (!summaryOnly) {
     process.stdout.write('GitHub repo scope is not pinned by the wizard; OpenClaw/Hermes will infer it from OPENCLAW_GITHUB_REPO, the local git remote, or runtime context when creating issues/PRs.\n');
@@ -3667,7 +3707,7 @@ async function askInputSourceConfig(rl, config, configPath) {
     },
   );
   config.sources = buildSourceConfigFromInputChannels(selected, config.sources || {});
-  return config;
+  return { config, selected, healthByConnector };
 }
 
 async function writeOpenClawJobManifest(configPath, config) {
@@ -3770,7 +3810,23 @@ async function main() {
     config.version = Number(config.version || 7);
     config.generatedAt = new Date().toISOString();
 
-    config = await askInputSourceConfig(rl, config, configPath);
+    const inputSetup = await askInputSourceConfig(rl, config, configPath);
+    config = inputSetup.config;
+    await ensureDirForFile(configPath);
+    await writeJsonFile(configPath, config);
+    const connectorsOk = await runConnectorSetupSteps({
+      rl,
+      args: { ...args, config: configPath },
+      selected: inputSetup.selected,
+      healthByConnector: inputSetup.healthByConnector,
+      allowIsolationPrompt: false,
+    });
+    if (!connectorsOk) {
+      return;
+    }
+    config = await loadEditableConfig(configPath);
+    config.version = Number(config.version || 7);
+    config.generatedAt = new Date().toISOString();
     config = await askIntervalConfig(rl, config);
     config = await askOutputConfig(rl, config);
     config = await askGitHubArtifactDetails(rl, config);
