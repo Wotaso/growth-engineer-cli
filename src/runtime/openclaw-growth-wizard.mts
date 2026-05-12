@@ -10,8 +10,6 @@ import { createPrivateKey } from 'node:crypto';
 import {
   buildExtraSourceConfig,
   getDefaultSourceCommand,
-  getDefaultSourceHint,
-  getDefaultSourcePath,
 } from './openclaw-growth-shared.mjs';
 import { loadOpenClawGrowthSecrets } from './openclaw-growth-env.mjs';
 
@@ -27,6 +25,13 @@ type ConnectorDefinition = {
   label: string;
   summary: string;
   needs: string;
+};
+type ConnectorPickerCopy = {
+  introTitle?: string;
+  introDetail?: string | null;
+  actionTitle?: string;
+  helpText?: string;
+  mode?: 'setup' | 'input';
 };
 
 class WizardAbortError extends Error {
@@ -311,15 +316,16 @@ async function askConnectorSelectionWithHealth(
   rl,
   healthByConnector: Record<string, any> = {},
   initialSelected: ConnectorKey[] = [],
+  copy: ConnectorPickerCopy = {},
 ): Promise<ConnectorKey[]> {
   if (!process.stdin.isTTY || !process.stdout.isTTY || !process.stdin.setRawMode) {
-    return await askConnectorSelectionByText(rl, healthByConnector);
+    return await askConnectorSelectionByText(rl, healthByConnector, copy);
   }
 
   rl.pause();
   let completed = false;
   try {
-    const selected = await askConnectorSelectionByKeys(healthByConnector, initialSelected);
+    const selected = await askConnectorSelectionByKeys(healthByConnector, initialSelected, copy);
     completed = true;
     return selected;
   } finally {
@@ -331,8 +337,12 @@ async function askConnectorSelectionWithHealth(
   }
 }
 
-async function askConnectorSelectionByText(rl, healthByConnector: Record<string, any> = {}): Promise<ConnectorKey[]> {
-  printConnectorIntro();
+async function askConnectorSelectionByText(
+  rl,
+  healthByConnector: Record<string, any> = {},
+  copy: ConnectorPickerCopy = {},
+): Promise<ConnectorKey[]> {
+  printConnectorIntro(copy);
   for (const group of connectorPickerGroups(healthByConnector)) {
     process.stdout.write(`${ANSI.bold}${group.title}${ANSI.reset}\n`);
     for (const connector of group.connectors) {
@@ -369,9 +379,15 @@ function orderConnectors(keys: ConnectorKey[]): ConnectorKey[] {
   return CONNECTOR_KEYS.filter((key) => selected.has(key));
 }
 
-function printConnectorIntro() {
-  process.stdout.write(`\n${ANSI.bold}OpenClaw connector setup${ANSI.reset}\n`);
-  process.stdout.write(`${ANSI.dim}You can configure connector secrets here. API keys stay in this host's local secrets file, not in chat or config JSON.${ANSI.reset}\n\n`);
+function printConnectorIntro(copy: ConnectorPickerCopy = {}) {
+  process.stdout.write(`\n${ANSI.bold}${copy.introTitle || 'OpenClaw connector setup'}${ANSI.reset}\n`);
+  const detail = copy.introDetail === undefined
+    ? 'You can configure connector secrets here. API keys stay in this host\'s local secrets file, not in chat or config JSON.'
+    : copy.introDetail;
+  if (detail) {
+    process.stdout.write(`${ANSI.dim}${detail}${ANSI.reset}\n`);
+  }
+  process.stdout.write('\n');
 }
 
 async function askMenuChoice<T extends string>(
@@ -702,11 +718,12 @@ function renderConnectorPicker(
   required: Set<ConnectorKey>,
   healthByConnector: Record<string, any> = {},
   warning = '',
+  copy: ConnectorPickerCopy = {},
 ) {
   process.stdout.write('\x1b[2J\x1b[H');
-  printConnectorIntro();
-  process.stdout.write(`${ANSI.bold}Select connectors to set up or overwrite now${ANSI.reset}\n`);
-  writeWrapped('Use Up/Down to move, Space to toggle optional connectors, A to toggle all optional connectors, Enter to continue.', '', ANSI.dim);
+  printConnectorIntro(copy);
+  process.stdout.write(`${ANSI.bold}${copy.actionTitle || 'Select connectors to set up or overwrite now'}${ANSI.reset}\n`);
+  writeWrapped(copy.helpText || 'Use Up/Down to move, Space to toggle optional connectors, A to toggle all optional connectors, Enter to continue.', '', ANSI.dim);
   process.stdout.write('\n');
 
   let index = 0;
@@ -738,6 +755,7 @@ function renderConnectorPicker(
 async function askConnectorSelectionByKeys(
   healthByConnector: Record<string, any> = {},
   initialSelected: ConnectorKey[] = [],
+  copy: ConnectorPickerCopy = {},
 ): Promise<ConnectorKey[]> {
   emitKeypressEvents(process.stdin);
   const wasRaw = process.stdin.isRaw;
@@ -746,10 +764,14 @@ async function askConnectorSelectionByKeys(
   process.stdin.resume();
 
   let cursorIndex = 0;
-  const required = getRequiredConnectorKeys();
+  const required = copy.mode === 'input' ? new Set<ConnectorKey>() : getRequiredConnectorKeys();
   const initial = new Set(initialSelected);
   const selected = new Set<ConnectorKey>(
-    CONNECTOR_KEYS.filter((key) => required.has(key) || initial.has(key) || !isConnectorLocallyConfigured(key)),
+    CONNECTOR_KEYS.filter((key) =>
+      required.has(key) ||
+      initial.has(key) ||
+      (copy.mode !== 'input' && !isConnectorLocallyConfigured(key)),
+    ),
   );
   let warning = '';
 
@@ -772,7 +794,7 @@ async function askConnectorSelectionByKeys(
       required.forEach((key) => selected.add(key));
       if (selected.size === 0) {
         warning = 'No connectors selected. Select a connector to update or press Esc to cancel.';
-        renderConnectorPicker(cursorIndex, selected, required, healthByConnector, warning);
+        renderConnectorPicker(cursorIndex, selected, required, healthByConnector, warning, copy);
         return;
       }
       cleanup();
@@ -848,12 +870,12 @@ async function askConnectorSelectionByKeys(
           }
         }
       }
-      renderConnectorPicker(cursorIndex, selected, required, healthByConnector, warning);
+      renderConnectorPicker(cursorIndex, selected, required, healthByConnector, warning, copy);
     };
 
     process.stdin.on('keypress', onKeypress);
     process.stdout.write(ANSI.hideCursor);
-    renderConnectorPicker(cursorIndex, selected, required, healthByConnector, warning);
+    renderConnectorPicker(cursorIndex, selected, required, healthByConnector, warning, copy);
   });
 }
 
@@ -3045,51 +3067,6 @@ async function askYesNo(rl, label, defaultYes = true) {
   }
 }
 
-async function askSourceConfig(rl, sourceName, defaultPath, hint, options: Record<string, any> = {}) {
-  const forceEnabled = Boolean(options.forceEnabled);
-  const defaultCommand = String(options.defaultCommand || getDefaultSourceCommand(sourceName) || '').trim();
-  const defaultMode = defaultCommand ? 'command' : 'file';
-  const defaultEnabled = options.defaultEnabled ?? sourceName === 'analytics';
-  const enabled = forceEnabled
-    ? true
-    : await askYesNo(rl, `Enable source "${sourceName}"?`, defaultEnabled);
-  if (!enabled) {
-    return {
-      enabled: false,
-      mode: 'file',
-      path: defaultPath,
-      hint,
-    };
-  }
-
-  process.stdout.write(`Where to get ${sourceName} data:\n${hint}\n`);
-  const modeInput = await ask(rl, 'Mode (file/command)', defaultMode);
-  const mode = modeInput.toLowerCase() === 'command' ? 'command' : 'file';
-  const value = await ask(
-    rl,
-    mode === 'file' ? `${sourceName} JSON file path` : `${sourceName} command`,
-    mode === 'file' ? defaultPath : defaultCommand,
-  );
-
-  if (mode === 'file') {
-    return {
-      enabled: true,
-      mode,
-      path: value,
-      hint,
-    };
-  }
-
-  return {
-    enabled: true,
-    mode,
-    command: value,
-    hint,
-    ...(options.cursorMode ? { cursorMode: options.cursorMode } : {}),
-    ...(options.initialLookback ? { initialLookback: options.initialLookback } : {}),
-  };
-}
-
 function printCadencePlan(cadences) {
   process.stdout.write('\nDefault growth cadence:\n');
   for (const cadence of cadences) {
@@ -3328,6 +3305,83 @@ function buildRecommendedSourceConfig() {
     },
     extra: [
       buildExtraSourceConfig('asc-cli', { enabled: false, mode: 'command', command: getDefaultSourceCommand('asc') }),
+    ],
+  };
+}
+
+function getInputChannelInitialSelection(config): ConnectorKey[] {
+  const sources = config?.sources || {};
+  const extraSources = Array.isArray(sources.extra) ? sources.extra : [];
+  const selected = new Set<ConnectorKey>();
+  const hasExplicitSources = Boolean(config?.sources);
+
+  if (!hasExplicitSources || sources.analytics?.enabled !== false) selected.add('analytics');
+  if (sources.revenuecat?.enabled === true || isConnectorLocallyConfigured('revenuecat')) selected.add('revenuecat');
+  if (!hasExplicitSources || sources.sentry?.enabled !== false) selected.add('sentry');
+  if (
+    extraSources.some((source) =>
+      ['asc', 'asc-cli', 'app-store-connect', 'app_store_connect'].includes(String(source?.service || source?.key || '').toLowerCase()) &&
+      source?.enabled !== false,
+    ) ||
+    isConnectorLocallyConfigured('asc')
+  ) {
+    selected.add('asc');
+  }
+  if (
+    config?.deliveries?.github?.enabled ||
+    config?.actions?.autoCreateIssues ||
+    config?.actions?.autoCreatePullRequests ||
+    isConnectorLocallyConfigured('github')
+  ) {
+    selected.add('github');
+  }
+
+  return orderConnectors([...selected]);
+}
+
+function buildSourceConfigFromInputChannels(selectedConnectors: ConnectorKey[], existingSources: Record<string, any> = {}) {
+  const selected = new Set(selectedConnectors);
+  const recommended = buildRecommendedSourceConfig();
+  const existingExtra = Array.isArray(existingSources.extra) ? existingSources.extra : [];
+  const ascSource = existingExtra.find((source) =>
+    ['asc', 'asc-cli', 'app-store-connect', 'app_store_connect'].includes(String(source?.service || source?.key || '').toLowerCase()),
+  );
+  const nonAscExtra = existingExtra.filter((source) => source !== ascSource);
+
+  return {
+    ...recommended,
+    ...existingSources,
+    analytics: {
+      ...recommended.analytics,
+      ...(existingSources.analytics || {}),
+      enabled: selected.has('analytics'),
+    },
+    revenuecat: {
+      ...recommended.revenuecat,
+      ...(existingSources.revenuecat || {}),
+      enabled: selected.has('revenuecat'),
+    },
+    sentry: {
+      ...recommended.sentry,
+      ...(existingSources.sentry || {}),
+      enabled: selected.has('sentry'),
+    },
+    feedback: {
+      ...recommended.feedback,
+      ...(existingSources.feedback || {}),
+      enabled: selected.has('analytics'),
+    },
+    extra: [
+      ...nonAscExtra,
+      {
+        ...buildExtraSourceConfig('asc-cli', {
+          enabled: selected.has('asc'),
+          mode: 'command',
+          command: getDefaultSourceCommand('asc'),
+        }),
+        ...(ascSource || {}),
+        enabled: selected.has('asc'),
+      },
     ],
   };
 }
@@ -3596,105 +3650,23 @@ async function askOutputsAndIntervalsConfig(rl, config) {
   return await askGitHubArtifactDetails(rl, withOutput);
 }
 
-async function askInputSourceConfig(rl, config) {
-  printSection('Input channels', [
-    'These are the data streams Growth Engineer will read during scheduled runs.',
-    'Connector credentials are configured through the connector setup; this section only chooses which inputs are enabled and how the runner fetches them.',
-  ]);
-  process.stdout.write('Recommended defaults: AnalyticsCLI product analytics, Sentry-compatible production stability, and feedback are enabled. RevenueCat and App Store Connect are ready to enable once their connectors are configured.\n\n');
-
-  const useRecommended = await askYesNo(rl, 'Use recommended input channels and default fetch commands?', true);
-  if (useRecommended) {
-    config.sources = {
-      ...buildRecommendedSourceConfig(),
-      ...(config.sources || {}),
-      analytics: {
-        ...buildRecommendedSourceConfig().analytics,
-        ...(config.sources?.analytics || {}),
-        enabled: config.sources?.analytics?.enabled !== false,
-      },
-      sentry: {
-        ...buildRecommendedSourceConfig().sentry,
-        ...(config.sources?.sentry || {}),
-        enabled: config.sources?.sentry?.enabled !== false,
-      },
-      feedback: {
-        ...buildRecommendedSourceConfig().feedback,
-        ...(config.sources?.feedback || {}),
-        enabled: config.sources?.feedback?.enabled !== false,
-      },
-      revenuecat: {
-        ...buildRecommendedSourceConfig().revenuecat,
-        ...(config.sources?.revenuecat || {}),
-      },
-      extra: Array.isArray(config.sources?.extra)
-        ? config.sources.extra
-        : buildRecommendedSourceConfig().extra,
-    };
-    return config;
-  }
-
-  process.stdout.write('\nAdvanced input setup\n');
-  process.stdout.write('Only change these when the default CLI exporters do not match this host.\n');
-  const analytics = await askSourceConfig(
+async function askInputSourceConfig(rl, config, configPath) {
+  const healthByConnector = await withConnectorHealthLoading((onProgress) =>
+    getConnectorPickerHealth(configPath, onProgress),
+  );
+  const selected = await askConnectorSelectionWithHealth(
     rl,
-    'analytics',
-    'data/openclaw-growth-engineer/analytics_summary.example.json',
-    getDefaultSourceHint('analytics'),
+    healthByConnector,
+    getInputChannelInitialSelection(config),
     {
-      forceEnabled: true,
-      defaultCommand: getDefaultSourceCommand('analytics'),
+      introTitle: 'Input channels',
+      introDetail: null,
+      actionTitle: 'Select input channels',
+      helpText: 'Use Up/Down to move, Space to toggle channels, A to toggle all channels, Enter to continue.',
+      mode: 'input',
     },
   );
-  const revenuecat = await askSourceConfig(
-    rl,
-    'revenuecat',
-    'data/openclaw-growth-engineer/revenuecat_summary.example.json',
-    getDefaultSourceHint('revenuecat'),
-  );
-  const sentry = await askSourceConfig(
-    rl,
-    'sentry',
-    'data/openclaw-growth-engineer/sentry_summary.example.json',
-    getDefaultSourceHint('sentry'),
-    {
-      defaultEnabled: true,
-      defaultCommand: getDefaultSourceCommand('sentry'),
-    },
-  );
-  const feedback = await askSourceConfig(
-    rl,
-    'feedback',
-    'data/openclaw-growth-engineer/feedback_summary.example.json',
-    getDefaultSourceHint('feedback'),
-    {
-      defaultEnabled: true,
-      defaultCommand: getDefaultSourceCommand('feedback'),
-      cursorMode: 'auto_since_last_fetch',
-      initialLookback: '30d',
-    },
-  );
-  const extraSourcesRaw = await ask(
-    rl,
-    'Extra input connectors to define now',
-    '',
-  );
-  const extraSources = extraSourcesRaw
-    .split(',')
-    .map((value) => value.trim())
-    .filter(Boolean)
-    .map((service) => {
-      const defaultCommand = getDefaultSourceCommand(service);
-      return buildExtraSourceConfig(service, defaultCommand ? {} : { mode: 'file', path: getDefaultSourcePath(service) });
-    });
-
-  config.sources = {
-    analytics,
-    revenuecat,
-    sentry,
-    feedback,
-    extra: extraSources,
-  };
+  config.sources = buildSourceConfigFromInputChannels(selected, config.sources || {});
   return config;
 }
 
@@ -3798,7 +3770,7 @@ async function main() {
     config.version = Number(config.version || 7);
     config.generatedAt = new Date().toISOString();
 
-    config = await askInputSourceConfig(rl, config);
+    config = await askInputSourceConfig(rl, config, configPath);
     config = await askIntervalConfig(rl, config);
     config = await askOutputConfig(rl, config);
     config = await askGitHubArtifactDetails(rl, config);
