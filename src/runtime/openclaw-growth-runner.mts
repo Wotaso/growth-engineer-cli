@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url';
 import {
   getActionMode,
   getAllSourceEntries,
+  getGitHubArtifactModes,
   getGitHubRequirementText,
   shouldAutoCreateGitHubArtifact,
 } from './openclaw-growth-shared.mjs';
@@ -1102,6 +1103,7 @@ async function runAnalyzer({
   runtimeDir,
   sourceFiles,
   createGitHubArtifact,
+  githubArtifactMode = getActionMode(config),
   chartManifestPath,
   cadencePlanPath,
 }) {
@@ -1143,11 +1145,11 @@ async function runAnalyzer({
   if (createGitHubArtifact) {
     const repo = String(config.project?.githubRepo || '').trim();
     args.push(
-      getActionMode(config) === 'pull_request' ? '--create-pull-requests' : '--create-issues',
+      githubArtifactMode === 'pull_request' ? '--create-pull-requests' : '--create-issues',
       '--repo',
       repo,
     );
-    if (getActionMode(config) === 'pull_request') {
+    if (githubArtifactMode === 'pull_request') {
       args.push('--allow-proposal-pull-requests');
     }
     const labels = Array.isArray(config.project?.labels) ? config.project.labels : [];
@@ -1419,8 +1421,11 @@ async function runOnce(configPath, statePath) {
     return;
   }
 
+  const githubArtifactModes = getGitHubArtifactModes(config).filter((mode) =>
+    shouldAutoCreateGitHubArtifact(config, mode),
+  );
   const createGitHubArtifact =
-    shouldAutoCreateGitHubArtifact(config) && Boolean(String(config.project?.githubRepo || '').trim());
+    githubArtifactModes.length > 0 && Boolean(String(config.project?.githubRepo || '').trim());
   const sourceFiles = await materializeSourceFiles(config, payloads, runtimeDir);
   const cadencePlanPath = path.join(runtimeDir, 'cadence-plan.json');
   await fs.writeFile(
@@ -1478,16 +1483,19 @@ async function runOnce(configPath, statePath) {
 
   const shouldCreateGitHubArtifact = createGitHubArtifact && Number(dryRun.issuesPayload?.issue_count || 0) > 0;
   if (shouldCreateGitHubArtifact) {
-    await runAnalyzer({
-      config,
-      runtimeDir,
-      sourceFiles,
-      createGitHubArtifact: true,
-      chartManifestPath,
-      cadencePlanPath,
-    });
+    for (const githubArtifactMode of githubArtifactModes) {
+      await runAnalyzer({
+        config,
+        runtimeDir,
+        sourceFiles,
+        createGitHubArtifact: true,
+        githubArtifactMode,
+        chartManifestPath,
+        cadencePlanPath,
+      });
+    }
     process.stdout.write(
-      `[${new Date().toISOString()}] Created GitHub ${getActionMode(config) === 'pull_request' ? 'pull requests' : 'issues'}.\n`,
+      `[${new Date().toISOString()}] Created GitHub ${githubArtifactModes.map((mode) => (mode === 'pull_request' ? 'pull requests' : 'issues')).join(' and ')}.\n`,
     );
   } else {
     process.stdout.write(

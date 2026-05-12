@@ -193,11 +193,46 @@ export function getActionMode(config) {
   return 'issue';
 }
 
-export function shouldAutoCreateGitHubArtifact(config) {
+export function getGitHubArtifactModes(config) {
+  const modes = [];
+  const hasExplicitDestinations = Array.isArray(config?.actions?.outputDestinations);
+  const destinations = hasExplicitDestinations
+    ? config.actions.outputDestinations.map((value) => normalizeServiceType(value))
+    : [];
+  const deliveryModes = Array.isArray(config?.deliveries?.github?.modes)
+    ? config.deliveries.github.modes.map((value) => normalizeServiceType(value))
+    : [];
+  if (
+    config?.actions?.autoCreateIssues === true ||
+    destinations.includes('github_issue') ||
+    deliveryModes.includes('issue')
+  ) {
+    modes.push('issue');
+  }
+  if (
+    config?.actions?.autoCreatePullRequests === true ||
+    destinations.includes('github_pull_request') ||
+    destinations.includes('github-pr') ||
+    destinations.includes('draft_pr') ||
+    deliveryModes.includes('pull_request') ||
+    deliveryModes.includes('pull-request')
+  ) {
+    modes.push('pull_request');
+  }
+  if (modes.length === 0 && !hasExplicitDestinations) {
+    modes.push(getActionMode(config));
+  }
+  return [...new Set(modes)];
+}
+
+export function shouldAutoCreateGitHubArtifact(config, requestedMode = null) {
   if (config?.actions?.disableAutoCreateGitHubArtifacts === true) {
     return false;
   }
-  const mode = getActionMode(config);
+  if (!requestedMode && Array.isArray(config?.actions?.outputDestinations) && getGitHubArtifactModes(config).length === 0) {
+    return false;
+  }
+  const mode = requestedMode || getActionMode(config);
   if (mode === 'pull_request') {
     return config?.actions?.autoCreatePullRequests === true;
   }

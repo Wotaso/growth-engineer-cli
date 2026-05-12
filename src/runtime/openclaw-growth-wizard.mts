@@ -528,6 +528,210 @@ async function askMenuChoice<T extends string>(
   }
 }
 
+async function askMultiChoice<T extends string>(
+  rl,
+  {
+    title,
+    subtitle = 'Use Up/Down to move, Space to toggle, Enter to continue.',
+    options,
+    defaultValues,
+    requiredValues = [],
+    minSelections = 1,
+    renderHeader,
+  }: {
+    title: string;
+    subtitle?: string;
+    options: Array<{ value: T; label: string; detail: string }>;
+    defaultValues: T[];
+    requiredValues?: T[];
+    minSelections?: number;
+    renderHeader?: () => void;
+  },
+): Promise<T[]> {
+  const required = new Set(requiredValues);
+  const normalizeSelection = (values: T[]) => {
+    const selected = new Set<T>(values);
+    requiredValues.forEach((value) => selected.add(value));
+    return options.map((option) => option.value).filter((value) => selected.has(value));
+  };
+
+  if (!process.stdin.isTTY || !process.stdout.isTTY || !process.stdin.setRawMode) {
+    process.stdout.write(`\n${title}\n`);
+    options.forEach((option, index) => {
+      const checked = defaultValues.includes(option.value) || required.has(option.value) ? 'x' : ' ';
+      const requiredLabel = required.has(option.value) ? ' required' : '';
+      process.stdout.write(`  ${index + 1}) [${checked}] ${option.label}${requiredLabel}: ${option.detail}\n`);
+    });
+    const answer = await ask(
+      rl,
+      `Select one or more (comma-separated 1-${options.length})`,
+      normalizeSelection(defaultValues).map((value) => String(options.findIndex((option) => option.value === value) + 1)).join(','),
+    );
+    const selected = answer
+      .split(',')
+      .map((value) => Number.parseInt(value.trim(), 10) - 1)
+      .filter((index) => options[index])
+      .map((index) => options[index].value);
+    const normalized = normalizeSelection(selected);
+    return normalized.length >= minSelections ? normalized : normalizeSelection(defaultValues);
+  }
+
+  rl.pause();
+  let completed = false;
+  try {
+    const selected = await askMultiChoiceByKeys({
+      title,
+      subtitle,
+      options,
+      defaultValues: normalizeSelection(defaultValues),
+      requiredValues,
+      minSelections,
+      renderHeader,
+    });
+    completed = true;
+    return selected;
+  } finally {
+    if (completed) {
+      rl.resume();
+    } else {
+      process.stdin.pause();
+    }
+  }
+}
+
+async function askMultiChoiceByKeys<T extends string>({
+  title,
+  subtitle,
+  options,
+  defaultValues,
+  requiredValues,
+  minSelections,
+  renderHeader,
+}: {
+  title: string;
+  subtitle: string;
+  options: Array<{ value: T; label: string; detail: string }>;
+  defaultValues: T[];
+  requiredValues: T[];
+  minSelections: number;
+  renderHeader?: () => void;
+}): Promise<T[]> {
+  emitKeypressEvents(process.stdin);
+  const wasRaw = process.stdin.isRaw;
+  const wasPaused = process.stdin.isPaused();
+  process.stdin.setRawMode(true);
+  process.stdin.resume();
+
+  const required = new Set(requiredValues);
+  const selected = new Set<T>(defaultValues);
+  requiredValues.forEach((value) => selected.add(value));
+  let cursorIndex = 0;
+  let warning = '';
+
+  return await new Promise<T[]>((resolve, reject) => {
+    const cleanup = () => {
+      process.stdin.off('keypress', onKeypress);
+      process.stdin.setRawMode(Boolean(wasRaw));
+      if (wasPaused) {
+        process.stdin.pause();
+      }
+      process.stdout.write(ANSI.showCursor);
+    };
+
+    const selectedValues = () => options.map((option) => option.value).filter((value) => selected.has(value));
+
+    const render = () => {
+      process.stdout.write('\x1b[2J\x1b[H');
+      renderHeader?.();
+      process.stdout.write(`\n${ANSI.bold}${title}${ANSI.reset}\n`);
+      process.stdout.write(`${ANSI.dim}${subtitle}${ANSI.reset}\n\n`);
+      if (warning) {
+        process.stdout.write(`${ANSI.cyan}${warning}${ANSI.reset}\n\n`);
+      }
+      for (let index = 0; index < options.length; index += 1) {
+        const option = options[index];
+        const pointer = index === cursorIndex ? `${ANSI.cyan}>${ANSI.reset}` : ' ';
+        const checkbox = selected.has(option.value) ? '[x]' : '[ ]';
+        const requiredLabel = required.has(option.value) ? ` ${ANSI.dim}(required)${ANSI.reset}` : '';
+        process.stdout.write(`${pointer} ${checkbox} ${index + 1}) ${ANSI.bold}${option.label}${ANSI.reset}${requiredLabel}\n`);
+        writeWrapped(option.detail, '      ', ANSI.dim);
+      }
+      process.stdout.write(`\n${ANSI.dim}Esc/Q cancels. Space toggles, A toggles all optional items, Enter continues. Number keys 1-${options.length} toggle items.${ANSI.reset}\n`);
+    };
+
+    const cancel = () => {
+      cleanup();
+      process.stdout.write('\n');
+      reject(new WizardAbortError('Setup cancelled.'));
+    };
+
+    const finish = () => {
+      const values = selectedValues();
+      if (values.length < minSelections) {
+        warning = `Select at least ${minSelections} item${minSelections === 1 ? '' : 's'} to continue.`;
+        render();
+        return;
+      }
+      cleanup();
+      process.stdout.write('\x1b[2J\x1b[H');
+      resolve(values);
+    };
+
+    const toggleIndex = (index) => {
+      const option = options[index];
+      if (!option) return;
+      warning = '';
+      if (required.has(option.value)) {
+        selected.add(option.value);
+        warning = `${option.label} is required.`;
+        return;
+      }
+      if (selected.has(option.value)) selected.delete(option.value);
+      else selected.add(option.value);
+      requiredValues.forEach((value) => selected.add(value));
+    };
+
+    const onKeypress = (_text, key) => {
+      if (key?.ctrl && key?.name === 'c') {
+        cancel();
+        return;
+      }
+      if (key?.name === 'escape' || key?.name === 'q') {
+        cancel();
+        return;
+      }
+      if (key?.name === 'up' || key?.name === 'k') {
+        cursorIndex = (cursorIndex - 1 + options.length) % options.length;
+        warning = '';
+      } else if (key?.name === 'down' || key?.name === 'j') {
+        cursorIndex = (cursorIndex + 1) % options.length;
+        warning = '';
+      } else if (key?.name === 'space') {
+        toggleIndex(cursorIndex);
+      } else if (String(_text || '').toLowerCase() === 'a') {
+        const optional = options.filter((option) => !required.has(option.value));
+        const allSelected = optional.every((option) => selected.has(option.value));
+        optional.forEach((option) => {
+          if (allSelected) selected.delete(option.value);
+          else selected.add(option.value);
+        });
+        requiredValues.forEach((value) => selected.add(value));
+        warning = '';
+      } else if (key?.name === 'return' || key?.name === 'enter') {
+        finish();
+        return;
+      } else if (/^[1-9]$/.test(String(_text || ''))) {
+        toggleIndex(Number(_text) - 1);
+      }
+      render();
+    };
+
+    process.stdin.on('keypress', onKeypress);
+    process.stdout.write(ANSI.hideCursor);
+    render();
+  });
+}
+
 async function askMenuChoiceByKeys<T extends string>({
   title,
   subtitle,
@@ -3181,12 +3385,37 @@ async function askYesNo(rl, label, defaultYes = true) {
   }
 }
 
+function truncateTableCell(value, width) {
+  const text = String(value || '').replace(/\s+/g, ' ').trim();
+  if (text.length <= width) return text.padEnd(width, ' ');
+  return `${text.slice(0, Math.max(0, width - 3))}...`.padEnd(width, ' ');
+}
+
+function printAsciiTable(headers, rows, widths) {
+  const border = `+${widths.map((width) => '-'.repeat(width + 2)).join('+')}+`;
+  const renderRow = (cells) => `| ${cells.map((cell, index) => truncateTableCell(cell, widths[index])).join(' | ')} |`;
+  process.stdout.write(`${border}\n`);
+  process.stdout.write(`${renderRow(headers)}\n`);
+  process.stdout.write(`${border}\n`);
+  for (const row of rows) {
+    process.stdout.write(`${renderRow(row)}\n`);
+  }
+  process.stdout.write(`${border}\n`);
+}
+
 function printCadencePlan(cadences) {
   process.stdout.write('\nDefault growth cadence:\n');
-  for (const cadence of cadences) {
-    const critical = cadence.criticalOnly ? 'critical only' : 'full review';
-    process.stdout.write(`- ${cadence.title} (${critical}): ${cadence.objective}\n`);
-  }
+  printAsciiTable(
+    ['Cadence', 'Every', 'Mode', 'Primary focus', 'What it decides'],
+    cadences.map((cadence) => [
+      cadence.key,
+      `${cadence.intervalDays}d`,
+      cadence.criticalOnly ? 'critical only' : 'full review',
+      Array.isArray(cadence.focusAreas) ? cadence.focusAreas.slice(0, 4).join(', ') : '',
+      cadence.objective,
+    ]),
+    [12, 7, 13, 30, 42],
+  );
   process.stdout.write('\n');
 }
 
@@ -3215,21 +3444,43 @@ async function askToolUsage(rl) {
   });
 }
 
-async function askCadencePlan(rl) {
-  const cadences: any[] = DEFAULT_CADENCE_PLAN.map((cadence) => ({ ...cadence }));
+async function askCadencePlan(rl, existingCadences: any[] = []) {
+  const existingByKey = new Map(
+    (Array.isArray(existingCadences) ? existingCadences : [])
+      .filter((cadence) => cadence?.key)
+      .map((cadence) => [String(cadence.key), cadence]),
+  );
+  const cadences: any[] = DEFAULT_CADENCE_PLAN.map((cadence) => ({
+    ...cadence,
+    ...(existingByKey.get(cadence.key) || {}),
+  }));
   printCadencePlan(cadences);
+  const selectedCadences = await askMultiChoice(rl, {
+    title: 'Scheduled review cadences',
+    subtitle: 'Use Up/Down to move, Space to toggle cadences, A to toggle all, Enter to continue.',
+    defaultValues: cadences.filter((cadence) => cadence.enabled !== false).map((cadence) => cadence.key),
+    minSelections: 1,
+    options: cadences.map((cadence) => ({
+      value: cadence.key,
+      label: cadence.title,
+      detail: `${cadence.intervalDays}d, ${cadence.criticalOnly ? 'critical only' : 'full review'} - ${cadence.objective}`,
+    })),
+  });
+  const selected = new Set(selectedCadences);
+  cadences.forEach((cadence) => {
+    cadence.enabled = selected.has(cadence.key);
+  });
+
   const customize = await askYesNo(
     rl,
-    'Use this default cadence plan? Answer no to edit daily/weekly/monthly/3-month/6-month/1-year instructions.',
-    true,
+    'Customize objectives, instructions, focus areas, or source priorities for enabled cadences?',
+    false,
   );
-  if (customize) return cadences;
+  if (!customize) return cadences;
 
   for (const cadence of cadences) {
+    if (cadence.enabled === false) continue;
     process.stdout.write(`\n${cadence.title}\n`);
-    const enabled = await askYesNo(rl, `Enable ${cadence.key}?`, true);
-    cadence.enabled = enabled;
-    if (!enabled) continue;
     cadence.objective = await ask(rl, `${cadence.key} objective`, cadence.objective);
     cadence.instructions = await ask(rl, `${cadence.key} instructions`, cadence.instructions);
     const focusAreas = await ask(rl, `${cadence.key} focus areas (comma-separated)`, cadence.focusAreas.join(','));
@@ -3595,11 +3846,29 @@ async function askOutputConfig(rl, config) {
     'GitHub issues or draft PRs are optional and only run when a token plus an inferred repo are available.',
   ]);
   const currentMode = config?.actions?.mode || config?.deliveries?.github?.mode || 'issue';
-  const currentAutoCreate = Boolean(config?.actions?.autoCreateIssues || config?.actions?.autoCreatePullRequests || config?.deliveries?.github?.autoCreate);
-  const outputChoice = await askMenuChoice(rl, {
-    title: 'Output mode',
-    subtitle: 'Use Up/Down to move, Enter to continue, or press 1-3.',
-    defaultValue: currentAutoCreate ? (currentMode === 'pull_request' ? 'pull_request' : 'issue') : 'chat',
+  const configuredDestinations = Array.isArray(config?.actions?.outputDestinations)
+    ? config.actions.outputDestinations
+    : [];
+  const currentAutoCreateIssue = Boolean(
+    config?.actions?.autoCreateIssues ||
+      configuredDestinations.includes('github_issue') ||
+      (config?.deliveries?.github?.autoCreate && currentMode !== 'pull_request'),
+  );
+  const currentAutoCreatePullRequest = Boolean(
+    config?.actions?.autoCreatePullRequests ||
+      configuredDestinations.includes('github_pull_request') ||
+      (config?.deliveries?.github?.autoCreate && currentMode === 'pull_request'),
+  );
+  const outputChoices = await askMultiChoice(rl, {
+    title: 'Output destinations',
+    subtitle: 'Use Up/Down to move, Space to toggle outputs, A to toggle all optional outputs, Enter to continue.',
+    defaultValues: [
+      'chat',
+      ...(currentAutoCreateIssue ? ['issue'] : []),
+      ...(currentAutoCreatePullRequest ? ['pull_request'] : []),
+    ],
+    requiredValues: ['chat'],
+    minSelections: 1,
     options: [
       {
         value: 'chat',
@@ -3618,9 +3887,11 @@ async function askOutputConfig(rl, config) {
       },
     ],
   });
-  const summaryOnly = outputChoice === 'chat';
-  const mode = outputChoice === 'pull_request' ? 'pull_request' : 'issue';
-  const autoCreate = !summaryOnly;
+  const wantsIssue = outputChoices.includes('issue');
+  const wantsPullRequest = outputChoices.includes('pull_request');
+  const summaryOnly = !wantsIssue && !wantsPullRequest;
+  const mode = wantsPullRequest ? 'pull_request' : 'issue';
+  const autoCreate = wantsIssue || wantsPullRequest;
 
   if (!summaryOnly) {
     process.stdout.write('GitHub repo scope is not pinned by the wizard; OpenClaw/Hermes will infer it from OPENCLAW_GITHUB_REPO, the local git remote, or runtime context when creating issues/PRs.\n');
@@ -3639,8 +3910,13 @@ async function askOutputConfig(rl, config) {
   config.actions = {
     ...(config.actions || {}),
     mode,
-    autoCreateIssues: mode === 'issue' && autoCreate,
-    autoCreatePullRequests: mode === 'pull_request' && autoCreate,
+    outputDestinations: [
+      'openclaw_chat',
+      ...(wantsIssue ? ['github_issue'] : []),
+      ...(wantsPullRequest ? ['github_pull_request'] : []),
+    ],
+    autoCreateIssues: wantsIssue,
+    autoCreatePullRequests: wantsPullRequest,
     autoCreateWhenGitHubWriteAccess: config.actions?.autoCreateWhenGitHubWriteAccess !== false,
     disableAutoCreateGitHubArtifacts: config.actions?.disableAutoCreateGitHubArtifacts === true,
     draftPullRequests: true,
@@ -3658,6 +3934,10 @@ async function askOutputConfig(rl, config) {
       ...(config.deliveries?.github || {}),
       enabled: !summaryOnly,
       mode,
+      modes: [
+        ...(wantsIssue ? ['issue'] : []),
+        ...(wantsPullRequest ? ['pull_request'] : []),
+      ],
       autoCreate,
       draftPullRequests: true,
       proposalBranchPrefix: config?.actions?.proposalBranchPrefix || 'openclaw/proposals',
@@ -3785,7 +4065,7 @@ async function askIntervalConfig(rl, config) {
     ),
     10,
   ) || DEFAULT_CONNECTOR_HEALTH_INTERVAL_MINUTES;
-  const cadences = await askCadencePlan(rl);
+  const cadences = await askCadencePlan(rl, currentSchedule.cadences);
 
   config.schedule = {
     ...currentSchedule,
