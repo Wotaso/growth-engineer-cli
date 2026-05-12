@@ -5,6 +5,7 @@ import path from 'node:path';
 import process from 'node:process';
 import { createHash } from 'node:crypto';
 import { spawn } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import {
   getActionMode,
   getAllSourceEntries,
@@ -18,6 +19,7 @@ const DEFAULT_STATE_PATH = 'data/openclaw-growth-engineer/state.json';
 const DEFAULT_RUNTIME_DIR = 'data/openclaw-growth-engineer/runtime';
 const DEFAULT_CONNECTOR_HEALTH_INTERVAL_MINUTES = 360;
 const SELF_UPDATE_INTERVAL_MS = 24 * 60 * 60 * 1000;
+const RUNTIME_DIR = path.dirname(fileURLToPath(import.meta.url));
 const DEFAULT_CADENCES = [
   {
     key: 'daily',
@@ -148,6 +150,19 @@ Default config: ${DEFAULT_CONFIG_PATH}
 Default state:  ${DEFAULT_STATE_PATH}
 `);
   process.exit(exitCode);
+}
+
+function resolveRuntimeScriptPath(scriptName) {
+  const candidates = [
+    path.join(RUNTIME_DIR, scriptName),
+    path.resolve('scripts', scriptName),
+    path.resolve('skills/openclaw-growth-engineer/scripts', scriptName),
+  ];
+  return candidates.find((candidate) => existsSync(candidate)) || path.join(RUNTIME_DIR, scriptName);
+}
+
+function nodeRuntimeScriptCommand(scriptName) {
+  return `node ${quote(resolveRuntimeScriptPath(scriptName))}`;
 }
 
 async function readJson(filePath): Promise<any> {
@@ -989,8 +1004,7 @@ async function maybeRunConnectorHealthCheck({ config, configPath, state, statePa
 
   await ensureDir(runtimeDir);
   const statusCommand = [
-    'node',
-    'scripts/openclaw-growth-status.mjs',
+    nodeRuntimeScriptCommand('openclaw-growth-status.mjs'),
     '--config',
     quote(configPath),
     '--timeout-ms',
@@ -1090,7 +1104,7 @@ async function runAnalyzer({
 
   const outFile = path.resolve(config.project?.outFile || 'data/openclaw-growth-engineer/issues.generated.json');
   const args = [
-    'scripts/openclaw-growth-engineer.mjs',
+    resolveRuntimeScriptPath('openclaw-growth-engineer.mjs'),
     '--analytics',
     sourceFiles.analytics,
     '--repo-root',
@@ -1177,7 +1191,7 @@ async function maybeGenerateCharts({ config, payloads, runtimeDir }) {
 
   const defaultCommand = [
     'python3',
-    'scripts/openclaw-growth-charts.py',
+    resolveRuntimeScriptPath('openclaw-growth-charts.py'),
     '--analytics',
     analyticsForChartsPath,
     '--out-dir',

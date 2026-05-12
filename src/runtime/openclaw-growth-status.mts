@@ -1,13 +1,15 @@
 #!/usr/bin/env node
 
-import { promises as fs } from 'node:fs';
+import { existsSync, promises as fs } from 'node:fs';
 import path from 'node:path';
 import process from 'node:process';
 import { spawn } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { applyOpenClawSecretRefs, loadOpenClawGrowthSecrets } from './openclaw-growth-env.mjs';
 
 const DEFAULT_CONFIG_PATH = 'data/openclaw-growth-engineer/config.json';
 const DEFAULT_TIMEOUT_MS = 15_000;
+const RUNTIME_DIR = path.dirname(fileURLToPath(import.meta.url));
 
 type ShellResult = {
   ok: boolean;
@@ -78,6 +80,19 @@ function quote(value) {
     return String(value);
   }
   return `'${String(value).replace(/'/g, `'\\''`)}'`;
+}
+
+function resolveRuntimeScriptPath(scriptName) {
+  const candidates = [
+    path.join(RUNTIME_DIR, scriptName),
+    path.resolve('scripts', scriptName),
+    path.resolve('skills/openclaw-growth-engineer/scripts', scriptName),
+  ];
+  return candidates.find((candidate) => existsSync(candidate)) || path.join(RUNTIME_DIR, scriptName);
+}
+
+function nodeRuntimeScriptCommand(scriptName) {
+  return `node ${quote(resolveRuntimeScriptPath(scriptName))}`;
 }
 
 function emitProgress(enabled, event) {
@@ -160,8 +175,7 @@ function isConfiguredRepo(value) {
 
 async function runPreflight(configPath, timeoutMs, progressJson = false) {
   const command = [
-    'node',
-    'scripts/openclaw-growth-preflight.mjs',
+    nodeRuntimeScriptCommand('openclaw-growth-preflight.mjs'),
     '--config',
     quote(configPath),
     '--test-connections',
