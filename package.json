@@ -1,6 +1,6 @@
 {
   "name": "@analyticscli/growth-engineer",
-  "version": "0.1.0-preview.0",
+  "version": "0.1.0-preview.1",
   "description": "Growth Engineer CLI for connector setup, scheduling, health checks, and OpenClaw-compatible growth runs.",
   "license": "MIT",
   "type": "module",

@@ -1243,6 +1243,7 @@ program
   .command('wizard')
   .description('Run the interactive Growth Engineer setup wizard')
   .allowUnknownOption(true)
+  .allowExcessArguments(true)
   .action(() => {
     const result = runRuntimeInteractive('openclaw-growth-wizard', forwardedArgsAfter('wizard'), {
       cwd: process.cwd(),
