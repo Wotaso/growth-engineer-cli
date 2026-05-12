@@ -1099,16 +1099,16 @@ function summarizeFailureFix(connector, blockers) {
     if (/revoked|unauthorized|UNAUTHORIZED/i.test(combined)) {
       return 'Paste a fresh AnalyticsCLI readonly CLI token in the wizard, then let setup retest.';
     }
-    return 'Verify the AnalyticsCLI token can list projects. Per-project query failures are reported as warnings and should not block connector setup.';
+    return 'Verify the AnalyticsCLI token can list accessible projects. Per-project query failures are reported as warnings and should not block connector setup.';
   }
   if (connector === 'sentry') {
     if (/404|Not Found/i.test(combined)) {
-      return 'Rerun Sentry/GlitchTip setup and use the correct base URL + discovered org. If projects are discovered, accept/select those projects.';
+      return 'Rerun Sentry/GlitchTip setup and use the correct base URL + visible org. Project scope stays unpinned and is resolved from app context later.';
     }
-    return 'Verify the Sentry/GlitchTip token, base URL, org, and project list, then rerun setup.';
+    return 'Verify the Sentry/GlitchTip token, base URL, and org, then rerun setup.';
   }
   if (connector === 'github') {
-    return 'Set project.githubRepo only if you want GitHub issue/PR delivery now; otherwise leave GitHub deferred.';
+    return 'Verify the GitHub token. Repo scope is inferred from OPENCLAW_GITHUB_REPO, the local git remote, or runtime context.';
   }
   if (connector === 'revenuecat') {
     return 'Paste a RevenueCat v2 secret API key with read-only project permissions, then rerun setup.';
@@ -1952,13 +1952,6 @@ function printSentryTokenGuidance({ baseUrl, tokenEnv }) {
   ]);
 }
 
-function parseCommaList(value) {
-  return String(value || '')
-    .split(',')
-    .map((entry) => entry.trim())
-    .filter(Boolean);
-}
-
 function buildUrl(baseUrl, pathname, params: Record<string, string | number | boolean | null | undefined> = {}) {
   const url = new URL(pathname, `${String(baseUrl || 'https://sentry.io').replace(/\/$/, '')}/`);
   for (const [key, value] of Object.entries(params)) {
@@ -2631,14 +2624,14 @@ async function guideSentryConnector(rl, secrets: Record<string, string>) {
       index === 0 ? process.env.SENTRY_ENVIRONMENT || 'production' : 'production',
     );
 
-    let projects = [];
     if (org.trim() && token) {
-      process.stdout.write(`Discovering Sentry projects for ${label}...\n`);
+      process.stdout.write(`Checking visible Sentry projects for ${label} without pinning project scope...\n`);
       const discovery = await discoverSentryProjects({ baseUrl, token, org });
+      let verifiedVisibleProjects = false;
       if (discovery.ok && discovery.projects.length > 0) {
-        projects = discovery.projects;
+        verifiedVisibleProjects = true;
         process.stdout.write(
-          `Configured ${projects.length} project(s): ${projects.slice(0, 8).join(', ')}${projects.length > 8 ? ', ...' : ''}\n`,
+          `Found ${discovery.projects.length} visible project(s). Project scope remains unpinned so OpenClaw/Hermes can decide per run.\n`,
         );
       } else {
         const fallbackOrgs = discoveredOrganizations
@@ -2648,17 +2641,16 @@ async function guideSentryConnector(rl, secrets: Record<string, string>) {
           process.stdout.write(`Trying visible org ${fallbackOrg}...\n`);
           const fallbackDiscovery = await discoverSentryProjects({ baseUrl, token, org: fallbackOrg });
           if (fallbackDiscovery.ok && fallbackDiscovery.projects.length > 0) {
-            projects = fallbackDiscovery.projects;
+            org = fallbackOrg;
+            verifiedVisibleProjects = true;
             process.stdout.write(
-              `Using org ${fallbackOrg}; configured ${projects.length} project(s): ${projects.slice(0, 8).join(', ')}${projects.length > 8 ? ', ...' : ''}\n`,
+              `Using org ${fallbackOrg}; found ${fallbackDiscovery.projects.length} visible project(s). Project scope remains unpinned.\n`,
             );
             break;
           }
         }
-        if (projects.length === 0) {
-          process.stdout.write(`Could not discover projects automatically (${discovery.detail}).\n`);
-          const manualProjects = parseCommaList(await ask(rl, `Project slugs for ${label} (comma-separated, leave empty to let app context decide)`, ''));
-          projects = manualProjects;
+        if (!verifiedVisibleProjects && !discovery.ok) {
+          process.stdout.write(`Could not verify visible projects automatically (${discovery.detail}). Project scope will be resolved from app context later.\n`);
         }
       }
     } else {
@@ -2671,7 +2663,6 @@ async function guideSentryConnector(rl, secrets: Record<string, string>) {
       baseUrl,
       tokenEnv,
       ...(org.trim() ? { org: org.trim() } : {}),
-      ...(projects.length > 0 ? { projects } : {}),
       ...(environment.trim() ? { environment: environment.trim() } : {}),
     });
 
@@ -3204,12 +3195,11 @@ function printWizardHeader() {
 }
 
 async function buildDefaultWizardConfig() {
-  const detectedRepo = await detectGitHubRepo();
   return {
     version: 7,
     generatedAt: new Date().toISOString(),
     project: {
-      githubRepo: detectedRepo || '',
+      githubRepo: '',
       repoRoot: '.',
       outFile: 'data/openclaw-growth-engineer/issues.generated.json',
       maxIssues: 4,
@@ -3405,12 +3395,7 @@ async function askOutputConfig(rl, config) {
       );
 
   if (!summaryOnly) {
-    const detectedRepo = await detectGitHubRepo();
-    const currentRepo = config?.project?.githubRepo || detectedRepo || '';
-    config.project = {
-      ...(config.project || {}),
-      githubRepo: await ask(rl, 'GitHub repo for issue/PR delivery (owner/name)', currentRepo),
-    };
+    process.stdout.write('GitHub repo scope is not pinned by the wizard; OpenClaw/Hermes will infer it from OPENCLAW_GITHUB_REPO, the local git remote, or runtime context when creating issues/PRs.\n');
   }
 
   const channels = await askNotificationChannels(rl, config);
@@ -3617,12 +3602,7 @@ async function main() {
       process.stdout.write('Daily checks prioritize Sentry and production anomalies; larger cadences analyze all configured projects and connectors.\n');
       return;
     }
-    const detectedRepo = await detectGitHubRepo();
-    const githubRepo = await ask(
-      rl,
-      'GitHub repo (owner/name, optional; leave empty to infer later)',
-      detectedRepo || '',
-    );
+    const githubRepo = '';
     const labelsRaw = await ask(rl, 'Issue labels (comma-separated)', 'ai-growth,autogenerated,product');
     const labels = labelsRaw
       .split(',')
