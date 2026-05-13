@@ -726,7 +726,7 @@ export function buildAscSummary(input) {
       delta_percent: -100,
       evidence: analyticsWarnings.slice(0, 3),
       suggested_actions: [
-        'Tell the OpenClaw user to run: asc web auth login',
+        'Tell the OpenClaw user to set ASC_WEB_APPLE_ID to the Apple Account email and run: asc web auth login --apple-id "$ASC_WEB_APPLE_ID"',
         'After login, verify with: asc web auth status --output json --pretty',
         'Retry the ASC exporter so units, conversion, source traffic, and production crash totals are available',
       ],

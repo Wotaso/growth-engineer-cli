@@ -2701,7 +2701,7 @@ async function ensureAscWebAnalyticsAuth(rl = null, secrets: Record<string, stri
   process.stdout.write('Still working: verifying whether the ASC web session is active.\n');
   if (!(await commandExists('asc'))) {
     throw new Error(
-      'The asc CLI is not installed yet. Install it with `openclaw start --connectors asc`, then rerun the connector wizard so it can run `asc web auth login`.',
+      'The asc CLI is not installed yet. Install it with `openclaw start --connectors asc`, then rerun the connector wizard so it can run `asc web auth login --apple-id <email>`.',
     );
   }
 

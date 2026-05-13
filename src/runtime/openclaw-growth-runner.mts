@@ -628,7 +628,7 @@ function buildConnectorHealthAlert(statusPayload, unhealthyConnectors) {
     }
     if (entry.key === 'appStoreConnect' && entry.status === 'partial') {
       lines.push(
-        '  Note: ASC web analytics uses a user-owned web session. If Apple expires it after a few hours, refresh it with `asc web auth login`; API-key ASC auth cannot replace this web session.',
+        '  Note: ASC web analytics uses a user-owned web session. If Apple expires it, set ASC_WEB_APPLE_ID to the Apple Account email and refresh with `asc web auth login --apple-id "$ASC_WEB_APPLE_ID"`; API-key ASC auth cannot replace this web session.',
       );
     }
   }
