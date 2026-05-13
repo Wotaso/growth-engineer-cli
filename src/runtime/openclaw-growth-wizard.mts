@@ -9,7 +9,9 @@ import { emitKeypressEvents } from 'node:readline';
 import { createPrivateKey } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import {
+  buildOpenClawGrowthSystemEvent,
   buildExtraSourceConfig,
+  getAutomationConfig,
   getDefaultSourceCommand,
 } from './openclaw-growth-shared.mjs';
 import { loadOpenClawGrowthSecrets } from './openclaw-growth-env.mjs';
@@ -19,6 +21,7 @@ const SELF_UPDATE_INTERVAL_MS = 24 * 60 * 60 * 1000;
 const ENABLE_ISOLATED_SECRET_RUNNER_WIZARD = false;
 const DEFAULT_GROWTH_INTERVAL_MINUTES = 1440;
 const DEFAULT_CONNECTOR_HEALTH_INTERVAL_MINUTES = 360;
+const DEFAULT_SCHEDULER_PROOF_PATH = 'data/openclaw-growth-engineer/runtime/scheduler-proof.jsonl';
 const GROWTH_ENGINEER_PACKAGE_SPEC =
   process.env.OPENCLAW_GROWTH_ENGINEER_PACKAGE || '@analyticscli/growth-engineer@preview';
 const RUNTIME_DIR = path.dirname(fileURLToPath(import.meta.url));
@@ -3646,6 +3649,15 @@ async function buildDefaultWizardConfig() {
         ],
       },
     },
+    automation: {
+      openclawCron: {
+        enabled: true,
+        mode: 'main',
+        schedule: '*/30 * * * *',
+        timezone: process.env.TZ || 'UTC',
+        name: 'OpenClaw Growth Engineer scheduler',
+      },
+    },
     secrets: {
       githubTokenEnv: 'GITHUB_TOKEN',
       githubTokenRef: { source: 'env', provider: 'default', id: 'GITHUB_TOKEN' },
@@ -4047,8 +4059,10 @@ async function askIntervalConfig(rl, config) {
   printSection('Schedule and analysis depth', [
     'The runner wakes up often, but larger reviews only run on their daily/weekly/monthly cadence.',
     'Connector health checks are separate and default to every 6 hours.',
+    'On OpenClaw VPS installs, OpenClaw Gateway cron should wake the agent; heartbeat stays as a fallback checklist.',
   ]);
   const currentSchedule = config?.schedule || {};
+  const currentAutomation = getAutomationConfig(config);
   const usageMode = await askToolUsage(rl);
   const intervalMinutes = Number.parseInt(
     await ask(rl, 'Growth runner wake-up interval in minutes', String(currentSchedule.intervalMinutes || DEFAULT_GROWTH_INTERVAL_MINUTES)),
@@ -4063,6 +4077,17 @@ async function askIntervalConfig(rl, config) {
     10,
   ) || DEFAULT_CONNECTOR_HEALTH_INTERVAL_MINUTES;
   const cadences = await askCadencePlan(rl, currentSchedule.cadences);
+  const enableOpenClawCron = await askYesNo(
+    rl,
+    'Install an OpenClaw Gateway cron job to wake Growth Engineer on this VPS?',
+    currentAutomation.openclawCron.enabled !== false,
+  );
+  const openclawCronSchedule = enableOpenClawCron
+    ? await ask(rl, 'OpenClaw cron expression for scheduler wakeups', currentAutomation.openclawCron.schedule || '*/30 * * * *')
+    : currentAutomation.openclawCron.schedule;
+  const openclawCronTimezone = enableOpenClawCron
+    ? await ask(rl, 'OpenClaw cron timezone', currentAutomation.openclawCron.timezone || process.env.TZ || 'UTC')
+    : currentAutomation.openclawCron.timezone;
 
   config.schedule = {
     ...currentSchedule,
@@ -4075,6 +4100,17 @@ async function askIntervalConfig(rl, config) {
   config.actions = {
     ...(config.actions || {}),
     usageMode,
+  };
+  config.automation = {
+    ...(config.automation || {}),
+    openclawCron: {
+      ...(currentAutomation.openclawCron || {}),
+      enabled: enableOpenClawCron,
+      mode: 'main',
+      schedule: openclawCronSchedule || '*/30 * * * *',
+      timezone: openclawCronTimezone || 'UTC',
+      name: currentAutomation.openclawCron.name || 'OpenClaw Growth Engineer scheduler',
+    },
   };
   return config;
 }
@@ -4119,6 +4155,7 @@ async function writeOpenClawJobManifest(configPath, config) {
   const actionMode = config?.actions?.mode || config?.deliveries?.github?.mode || 'issue';
   const growthRunCommand = getGrowthRunCommand(config, displayConfigPath);
   const connectorHealthCommand = getConnectorHealthCommand(config, displayConfigPath);
+  const automation = getAutomationConfig(config);
   const manifest = {
     version: 1,
     generatedAt: new Date().toISOString(),
@@ -4134,6 +4171,18 @@ async function writeOpenClawJobManifest(configPath, config) {
       secretPolicy: config?.security?.connectorSecrets?.mode === 'isolated-runner'
         ? 'OpenClaw must use the allowlisted sudo wrapper commands and must not read the persisted secret file.'
         : 'Secrets are persisted in a local chmod 600 file. This protects against other OS users, not against the same OS user.',
+    },
+    scheduler: {
+      recommended: 'openclaw-cron',
+      openclawCron: automation.openclawCron,
+      proofPath: DEFAULT_SCHEDULER_PROOF_PATH,
+      verifyCommands: [
+        'openclaw cron list',
+        'openclaw tasks list',
+        'openclaw tasks audit',
+        `tail -n 20 ${DEFAULT_SCHEDULER_PROOF_PATH}`,
+        'jq \'.connectorHealth, .cadences, .lastRunAt, .skippedReason\' data/openclaw-growth-engineer/state.json',
+      ],
     },
     jobs: [
       {
@@ -4155,6 +4204,87 @@ async function writeOpenClawJobManifest(configPath, config) {
   };
   await writeJsonFile(manifestPath, manifest);
   return manifestPath;
+}
+
+function buildOpenClawCronAddCommand(configPath, config) {
+  const automation = getAutomationConfig(config).openclawCron;
+  const displayConfigPath = path.relative(process.cwd(), configPath) || configPath;
+  const eventText = buildOpenClawGrowthSystemEvent(displayConfigPath, config);
+  return [
+    'openclaw cron add',
+    '--name',
+    quote(automation.name),
+    '--cron',
+    quote(automation.schedule),
+    '--tz',
+    quote(automation.timezone),
+    '--session',
+    automation.mode === 'isolated' ? 'isolated' : 'main',
+    automation.mode === 'isolated' ? '--message' : '--system-event',
+    quote(eventText),
+    automation.mode === 'isolated' ? '--announce' : '--wake now',
+  ].join(' ');
+}
+
+async function ensureOpenClawCronFromWizard(configPath, config) {
+  const automation = getAutomationConfig(config).openclawCron;
+  const proofPath = path.resolve(DEFAULT_SCHEDULER_PROOF_PATH);
+  if (automation.enabled === false) {
+    return {
+      ok: true,
+      installed: false,
+      status: 'disabled',
+      detail: 'OpenClaw Gateway cron disabled by user choice.',
+      proofPath,
+    };
+  }
+
+  const addCommand = buildOpenClawCronAddCommand(configPath, config);
+  if (!(await commandExists('openclaw'))) {
+    return {
+      ok: true,
+      installed: false,
+      status: 'openclaw_cli_missing',
+      detail: 'openclaw CLI was not found on PATH. Run the shown command on the VPS shell where OpenClaw Gateway is installed.',
+      command: addCommand,
+      proofPath,
+    };
+  }
+
+  const list = await runCommandCapture('openclaw cron list');
+  if (list.ok && list.stdout.includes(automation.name)) {
+    return {
+      ok: true,
+      installed: true,
+      status: 'already_configured',
+      detail: `OpenClaw cron job already exists: ${automation.name}`,
+      proofPath,
+    };
+  }
+
+  const add = await runCommandCapture(addCommand);
+  return {
+    ok: add.ok,
+    installed: add.ok,
+    status: add.ok ? 'configured' : 'failed',
+    detail: add.ok ? `Configured OpenClaw cron job: ${automation.name}` : add.stderr || add.stdout || `exit ${add.code}`,
+    command: addCommand,
+    proofPath,
+  };
+}
+
+function printOpenClawCronResult(result) {
+  process.stdout.write(`OpenClaw cron: ${result.status} - ${result.detail}\n`);
+  if (result.command && result.status === 'openclaw_cli_missing') {
+    process.stdout.write('\nRun this on the VPS where OpenClaw Gateway is installed:\n');
+    process.stdout.write(`${result.command}\n`);
+  }
+  process.stdout.write('\nVPS verification commands:\n');
+  process.stdout.write('  openclaw cron list\n');
+  process.stdout.write('  openclaw tasks list\n');
+  process.stdout.write('  openclaw tasks audit\n');
+  process.stdout.write(`  tail -n 20 ${result.proofPath || path.resolve(DEFAULT_SCHEDULER_PROOF_PATH)}\n`);
+  process.stdout.write("  jq '.connectorHealth, .cadences, .lastRunAt, .skippedReason' data/openclaw-growth-engineer/state.json\n");
 }
 
 async function main() {
@@ -4187,8 +4317,10 @@ async function main() {
       const secretAccess = await askSecretAccessModel(rl, configPath, config);
       await writeJsonFile(configPath, config);
       const manifestPath = await writeOpenClawJobManifest(configPath, config);
+      const cronResult = await ensureOpenClawCronFromWizard(configPath, config);
       process.stdout.write(`\nSaved schedule config: ${configPath}\n`);
       process.stdout.write(`Saved OpenClaw job manifest: ${manifestPath}\n`);
+      printOpenClawCronResult(cronResult);
       printSecretRunnerKitInstructions(secretAccess.kit);
       process.stdout.write('OpenClaw can run and update growth jobs plus non-secret connector config from the manifest; connector API keys stay behind the connector wizard.\n');
       return;
@@ -4198,8 +4330,10 @@ async function main() {
       const secretAccess = await askSecretAccessModel(rl, configPath, config);
       await writeJsonFile(configPath, config);
       const manifestPath = await writeOpenClawJobManifest(configPath, config);
+      const cronResult = await ensureOpenClawCronFromWizard(configPath, config);
       process.stdout.write(`\nSaved output and interval config: ${configPath}\n`);
       process.stdout.write(`Saved OpenClaw job manifest: ${manifestPath}\n`);
+      printOpenClawCronResult(cronResult);
       printSecretRunnerKitInstructions(secretAccess.kit);
       process.stdout.write('Daily checks prioritize Sentry and production anomalies; larger cadences analyze all configured projects and connectors.\n');
       return;
@@ -4234,16 +4368,16 @@ async function main() {
     await ensureDirForFile(configPath);
     await fs.writeFile(configPath, JSON.stringify(config, null, 2), 'utf8');
     const manifestPath = await writeOpenClawJobManifest(configPath, config);
+    const cronResult = await ensureOpenClawCronFromWizard(configPath, config);
 
     process.stdout.write(`\nSaved config: ${configPath}\n`);
     process.stdout.write(`Saved OpenClaw job manifest: ${manifestPath}\n`);
+    printOpenClawCronResult(cronResult);
     printSecretRunnerKitInstructions(secretAccess.kit);
     process.stdout.write('\nNext steps:\n');
     process.stdout.write(`1) Set secrets in OpenClaw secret store (env var names in config.secrets)\n`);
     process.stdout.write(`2) Run once: ${growthEngineerPackageCommand(`run --config ${quote(configPath)}`)}\n`);
-    process.stdout.write(
-      `3) Run interval loop: ${growthEngineerPackageCommand(`run --config ${quote(configPath)} --loop`)}\n`,
-    );
+    process.stdout.write('3) Prefer OpenClaw Gateway cron for recurring VPS runs; use the interval loop only as a manual fallback.\n');
   } finally {
     rl.close();
   }

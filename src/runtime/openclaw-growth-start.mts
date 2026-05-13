@@ -5,12 +5,18 @@ import path from 'node:path';
 import process from 'node:process';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { getActionMode, getDefaultSourceCommand } from './openclaw-growth-shared.mjs';
+import {
+  buildOpenClawGrowthSystemEvent,
+  getActionMode,
+  getAutomationConfig,
+  getDefaultSourceCommand,
+} from './openclaw-growth-shared.mjs';
 import { applyOpenClawSecretRefs, loadOpenClawGrowthSecrets } from './openclaw-growth-env.mjs';
 
 const DEFAULT_CONFIG_PATH = 'data/openclaw-growth-engineer/config.json';
 const DEFAULT_TEMPLATE_PATH = 'data/openclaw-growth-engineer/config.example.json';
 const DEFAULT_HEARTBEAT_PATH = 'HEARTBEAT.md';
+const DEFAULT_SCHEDULER_PROOF_PATH = 'data/openclaw-growth-engineer/runtime/scheduler-proof.jsonl';
 const HEARTBEAT_MARKER_START = '<!-- openclaw-growth-engineer:start -->';
 const HEARTBEAT_MARKER_END = '<!-- openclaw-growth-engineer:end -->';
 const ANALYTICSCLI_PACKAGE_SPEC = process.env.ANALYTICSCLI_CLI_PACKAGE || '@analyticscli/cli@preview';
@@ -50,6 +56,11 @@ Options:
                          Limit live preflight checks to analytics,github,asc,revenuecat,sentry
   --setup-only           Run bootstrap + preflight only (skip first run)
   --no-test-connections  Skip live API smoke checks in preflight
+  --openclaw-cron <mode> Configure OpenClaw Gateway cron: auto, enable, require, disable (default: auto)
+  --openclaw-cron-schedule <expr>
+                         Cron expression for OpenClaw Gateway cron (default: */30 * * * *)
+  --openclaw-cron-tz <tz>
+                         Timezone for OpenClaw Gateway cron (default: TZ or UTC)
   --progress-json        Emit machine-readable setup progress to stderr
   --help, -h             Show help
 `);
@@ -65,6 +76,9 @@ function parseArgs(argv) {
     testConnections: true,
     connectors: [],
     onlyConnectors: [],
+    openclawCron: String(process.env.OPENCLAW_GROWTH_OPENCLAW_CRON || 'auto').trim().toLowerCase(),
+    openclawCronSchedule: '',
+    openclawCronTimezone: '',
     progressJson: false,
   };
 
@@ -92,6 +106,19 @@ function parseArgs(argv) {
       args.run = false;
     } else if (token === '--no-test-connections') {
       args.testConnections = false;
+    } else if (token === '--openclaw-cron') {
+      args.openclawCron = String(next || '').trim().toLowerCase() || 'auto';
+      i += 1;
+    } else if (token === '--enable-openclaw-cron') {
+      args.openclawCron = 'enable';
+    } else if (token === '--no-openclaw-cron') {
+      args.openclawCron = 'disable';
+    } else if (token === '--openclaw-cron-schedule') {
+      args.openclawCronSchedule = String(next || '').trim();
+      i += 1;
+    } else if (token === '--openclaw-cron-tz') {
+      args.openclawCronTimezone = String(next || '').trim();
+      i += 1;
     } else if (token === '--progress-json') {
       args.progressJson = true;
     } else if (token === '--help' || token === '-h') {
@@ -101,7 +128,14 @@ function parseArgs(argv) {
     }
   }
 
+  args.openclawCron = validateOpenClawCronMode(args.openclawCron);
   return args;
+}
+
+function validateOpenClawCronMode(value) {
+  const mode = String(value || 'auto').trim().toLowerCase();
+  if (['auto', 'enable', 'require', 'disable'].includes(mode)) return mode;
+  printHelpAndExit(1, `Invalid --openclaw-cron mode: ${value}. Use auto, enable, require, or disable.`);
 }
 
 function normalizeConnectorKey(value) {
@@ -620,6 +654,107 @@ async function ensureGrowthHeartbeat(configPath, config) {
     interval: formatHeartbeatInterval(getHeartbeatInterval(config)),
     created: false,
     updated: false,
+  };
+}
+
+function applyOpenClawCronOverrides(config, args) {
+  const automation = getAutomationConfig(config);
+  const cron = {
+    ...automation.openclawCron,
+    ...(args.openclawCronSchedule ? { schedule: args.openclawCronSchedule } : {}),
+    ...(args.openclawCronTimezone ? { timezone: args.openclawCronTimezone } : {}),
+  };
+  return {
+    ...config,
+    automation: {
+      ...(config?.automation || {}),
+      openclawCron: cron,
+    },
+  };
+}
+
+function getOpenClawCronProofCommands(configPath) {
+  return {
+    listCommand: 'openclaw cron list',
+    runsCommand: 'openclaw cron runs --id <job-id>',
+    stateCommand: `jq '.connectorHealth, .cadences, .lastRunAt, .skippedReason' ${quote(path.resolve('data/openclaw-growth-engineer/state.json'))}`,
+    proofCommand: `tail -n 20 ${quote(path.resolve(DEFAULT_SCHEDULER_PROOF_PATH))}`,
+    manualWakeCommand: `openclaw system event --text ${quote(`Run OpenClaw Growth Engineer now using config ${relativeWorkspacePath(configPath)} and inspect scheduler proof.`)} --mode now`,
+  };
+}
+
+async function ensureOpenClawCronSchedule(configPath, config, mode = 'auto') {
+  const normalizedMode = validateOpenClawCronMode(mode);
+  const automation = getAutomationConfig(config);
+  const proof = getOpenClawCronProofCommands(configPath);
+  if (normalizedMode === 'disable' || automation.openclawCron.enabled === false) {
+    return {
+      ok: true,
+      enabled: false,
+      installed: false,
+      status: 'disabled',
+      detail: 'OpenClaw Gateway cron setup disabled',
+      proof,
+    };
+  }
+
+  const openclawPath = await resolveCommandPath('openclaw');
+  if (!openclawPath) {
+    const detail = 'openclaw CLI not found on PATH; skipping OpenClaw Gateway cron setup';
+    return {
+      ok: normalizedMode === 'auto',
+      enabled: true,
+      installed: false,
+      status: normalizedMode === 'auto' ? 'skipped' : 'failed',
+      detail,
+      remediation: 'Run this setup inside the VPS shell where OpenClaw Gateway is installed, or install the openclaw CLI.',
+      proof,
+    };
+  }
+
+  const list = await runShellCommand('openclaw cron list', 30_000);
+  if (list.ok && list.stdout.includes(automation.openclawCron.name)) {
+    return {
+      ok: true,
+      enabled: true,
+      installed: true,
+      status: 'already_configured',
+      detail: `OpenClaw cron job already exists: ${automation.openclawCron.name}`,
+      schedule: automation.openclawCron.schedule,
+      timezone: automation.openclawCron.timezone,
+      proof,
+    };
+  }
+
+  const displayConfigPath = relativeWorkspacePath(configPath);
+  const eventText = buildOpenClawGrowthSystemEvent(displayConfigPath, config);
+  const addCommand = [
+    'openclaw cron add',
+    '--name',
+    quote(automation.openclawCron.name),
+    '--cron',
+    quote(automation.openclawCron.schedule),
+    '--tz',
+    quote(automation.openclawCron.timezone),
+    '--session',
+    automation.openclawCron.mode === 'isolated' ? 'isolated' : 'main',
+    automation.openclawCron.mode === 'isolated' ? '--message' : '--system-event',
+    quote(eventText),
+    automation.openclawCron.mode === 'isolated' ? '--announce' : '--wake now',
+  ].join(' ');
+  const add = await runShellCommand(addCommand, 60_000);
+  return {
+    ok: add.ok || normalizedMode === 'auto',
+    enabled: true,
+    installed: add.ok,
+    status: add.ok ? 'configured' : 'failed',
+    detail: add.ok
+      ? `Configured OpenClaw cron job "${automation.openclawCron.name}" (${automation.openclawCron.schedule}, ${automation.openclawCron.timezone})`
+      : add.stderr.trim() || add.stdout.trim() || `openclaw cron add exited ${add.code}`,
+    schedule: automation.openclawCron.schedule,
+    timezone: automation.openclawCron.timezone,
+    command: addCommand,
+    proof,
   };
 }
 
@@ -1515,9 +1650,35 @@ async function main() {
   const configPath = path.resolve(args.config);
 
   const configResult = await ensureConfig(configPath);
-  const initialConfig = await readJson(configPath);
+  const initialConfig = applyOpenClawCronOverrides(await readJson(configPath), args);
   await applyOpenClawSecretRefs(initialConfig);
   const heartbeat = await ensureGrowthHeartbeat(configPath, initialConfig);
+  const openclawCron = await ensureOpenClawCronSchedule(configPath, initialConfig, args.openclawCron);
+  if (!openclawCron.ok) {
+    process.stdout.write(
+      `${JSON.stringify(
+        {
+          ok: false,
+          phase: 'openclaw_cron_setup',
+          configCreated: configResult.created,
+          configPath,
+          heartbeat,
+          openclawCron,
+          blockers: [
+            {
+              check: 'scheduler:openclaw-cron',
+              detail: openclawCron.detail,
+              remediation: openclawCron.remediation || 'Fix OpenClaw cron setup and rerun start.',
+            },
+          ],
+        },
+        null,
+        2,
+      )}\n`,
+    );
+    process.exitCode = 1;
+    return;
+  }
   const projectConfigured = await configureAnalyticsProject(configPath, args.project);
   const ascAppConfiguredFromArg = await configureAscApp(configPath, args.ascApp);
   const analyticscliEnsure = await ensureAnalyticsCliInstalled();
@@ -1530,6 +1691,7 @@ async function main() {
           configCreated: configResult.created,
           configPath,
           heartbeat,
+          openclawCron,
           projectConfigured,
           ascAppConfigured: ascAppConfiguredFromArg,
           blockers: [
@@ -1578,6 +1740,7 @@ async function main() {
           configCreated: configResult.created,
           configPath,
           heartbeat,
+          openclawCron,
           projectConfigured,
           ascAppConfigured: ascAppConfiguredFromArg,
           connectorSetup,
@@ -1653,6 +1816,7 @@ async function main() {
           configCreated: configResult.created,
           configPath,
           heartbeat,
+          openclawCron,
           projectConfigured: projectConfigured || analyticsProjectSetup.configured,
           analyticsProjectId: analyticsProjectSetup.projectId || null,
           ascAppConfigured: false,
@@ -1704,6 +1868,7 @@ async function main() {
           configCreated: configResult.created,
           configPath,
           heartbeat,
+          openclawCron,
           projectConfigured: projectConfigured || analyticsProjectSetup.configured,
           analyticsProjectId: analyticsProjectSetup.projectId || null,
           ascAppConfigured: ascAppSetup.configured,
@@ -1731,12 +1896,14 @@ async function main() {
           configCreated: configResult.created,
           configPath,
           heartbeat,
+          openclawCron,
           projectConfigured: projectConfigured || analyticsProjectSetup.configured,
           analyticsProjectId: analyticsProjectSetup.projectId || null,
           ascAppConfigured: ascAppSetup.configured,
           ascAppId: ascAppSetup.appId || null,
           ascAppScope: ascAppSetup.appScope || null,
           connectorSetup,
+          schedulerProofPath: path.resolve(DEFAULT_SCHEDULER_PROOF_PATH),
           message: 'Preflight passed. First run skipped due to --setup-only.',
         },
         null,
@@ -1773,6 +1940,7 @@ async function main() {
           configCreated: configResult.created,
           configPath,
           heartbeat,
+          openclawCron,
           projectConfigured,
           error: rawError,
         },
@@ -1793,9 +1961,11 @@ async function main() {
         configCreated: configResult.created,
         configPath,
         heartbeat,
+        openclawCron,
         projectConfigured,
         actionMode,
         runnerOutput: runResult.stdout.trim(),
+        schedulerProofPath: path.resolve(DEFAULT_SCHEDULER_PROOF_PATH),
       },
       null,
       2,

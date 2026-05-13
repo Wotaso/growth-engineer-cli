@@ -18,6 +18,7 @@ import { applyOpenClawSecretRefs, loadOpenClawGrowthSecrets } from './openclaw-g
 const DEFAULT_CONFIG_PATH = 'data/openclaw-growth-engineer/config.json';
 const DEFAULT_STATE_PATH = 'data/openclaw-growth-engineer/state.json';
 const DEFAULT_RUNTIME_DIR = 'data/openclaw-growth-engineer/runtime';
+const DEFAULT_SCHEDULER_PROOF_PATH = 'data/openclaw-growth-engineer/runtime/scheduler-proof.jsonl';
 const DEFAULT_CONNECTOR_HEALTH_INTERVAL_MINUTES = 360;
 const SELF_UPDATE_INTERVAL_MS = 24 * 60 * 60 * 1000;
 const RUNTIME_DIR = path.dirname(fileURLToPath(import.meta.url));
@@ -213,6 +214,19 @@ async function readJsonOptional(filePath, fallback) {
 
 async function ensureDir(dirPath) {
   await fs.mkdir(dirPath, { recursive: true });
+}
+
+async function appendSchedulerProof(event, details: Record<string, any> = {}) {
+  const proofPath = path.resolve(DEFAULT_SCHEDULER_PROOF_PATH);
+  const entry = {
+    ts: new Date().toISOString(),
+    event,
+    pid: process.pid,
+    cwd: process.cwd(),
+    ...details,
+  };
+  await fs.mkdir(path.dirname(proofPath), { recursive: true });
+  await fs.appendFile(proofPath, `${JSON.stringify(entry)}\n`, 'utf8');
 }
 
 function sha256(input) {
@@ -1072,6 +1086,12 @@ async function maybeRunConnectorHealthCheck({ config, configPath, state, statePa
   const healthState = state?.connectorHealth || {};
   const intervalMinutes = getConnectorHealthIntervalMinutes(config);
   if (!isDue(healthState.lastCheckedAt, intervalMinutes)) {
+    await appendSchedulerProof('connector_health_not_due', {
+      configPath,
+      statePath,
+      intervalMinutes,
+      lastCheckedAt: healthState.lastCheckedAt || null,
+    });
     return state;
   }
 
@@ -1098,6 +1118,13 @@ async function maybeRunConnectorHealthCheck({ config, configPath, state, statePa
     };
     await fs.mkdir(path.dirname(statePath), { recursive: true });
     await fs.writeFile(statePath, JSON.stringify(nextState, null, 2), 'utf8');
+    await appendSchedulerProof('connector_health_check_failed', {
+      configPath,
+      statePath,
+      intervalMinutes,
+      checkedAt,
+      error: nextState.connectorHealth.lastError,
+    });
     return nextState;
   }
 
@@ -1151,6 +1178,21 @@ async function maybeRunConnectorHealthCheck({ config, configPath, state, statePa
   };
   await fs.mkdir(path.dirname(statePath), { recursive: true });
   await fs.writeFile(statePath, JSON.stringify(nextState, null, 2), 'utf8');
+  await appendSchedulerProof('connector_health_checked', {
+    configPath,
+    statePath,
+    intervalMinutes,
+    checkedAt,
+    lastStatusOk: nextHealthState.lastStatusOk,
+    connectedConnectors,
+    unhealthyConnectors: unhealthyConnectors.map((entry) => ({
+      key: entry.key,
+      status: entry.status,
+      detail: entry.detail,
+    })),
+    alertMarkdownPath: nextHealthState.lastAlertMarkdownPath || null,
+    deliveryCount: Array.isArray(nextHealthState.lastAlertDeliveries) ? nextHealthState.lastAlertDeliveries.length : 0,
+  });
   return nextState;
 }
 
@@ -1433,6 +1475,11 @@ function hasSourceChanges(previousHashes, currentHashes) {
 }
 
 async function runOnce(configPath, statePath) {
+  await appendSchedulerProof('runner_invoked', {
+    configPath,
+    statePath,
+    argv: process.argv.slice(2),
+  });
   const config = await readJson(configPath);
   await applyOpenClawSecretRefs(config);
   const inferredGitHubRepo = await inferGitHubRepo(config);
@@ -1465,6 +1512,7 @@ async function runOnce(configPath, statePath) {
 
   if (!changed && config.schedule?.skipIfNoDataChange !== false) {
     process.stdout.write(`[${new Date().toISOString()}] No data changes. Skip run.\n`);
+    const completedAt = new Date().toISOString();
     await fs.mkdir(path.dirname(statePath), { recursive: true });
     await fs.writeFile(
       statePath,
@@ -1473,7 +1521,7 @@ async function runOnce(configPath, statePath) {
           ...stateAfterHealthCheck,
           sourceHashes: currentHashes,
           sourceCursors,
-          lastRunAt: new Date().toISOString(),
+          lastRunAt: completedAt,
           skippedReason: 'no_data_change',
         },
         null,
@@ -1481,6 +1529,13 @@ async function runOnce(configPath, statePath) {
       ),
       'utf8',
     );
+    await appendSchedulerProof('runner_completed', {
+      configPath,
+      statePath,
+      completedAt,
+      skippedReason: 'no_data_change',
+      activeCadences: activeCadences.map((cadence) => cadence.key),
+    });
     return;
   }
 
@@ -1522,6 +1577,7 @@ async function runOnce(configPath, statePath) {
 
   if (unchangedIssueSet && config.schedule?.skipIfIssueSetUnchanged !== false) {
     process.stdout.write(`[${new Date().toISOString()}] Issue set unchanged. Skip GitHub creation.\n`);
+    const completedAt = new Date().toISOString();
     await fs.mkdir(path.dirname(statePath), { recursive: true });
     await fs.writeFile(
       statePath,
@@ -1531,9 +1587,9 @@ async function runOnce(configPath, statePath) {
           sourceHashes: currentHashes,
           sourceCursors,
           lastIssueFingerprint: issueFingerprint,
-          lastRunAt: new Date().toISOString(),
+          lastRunAt: completedAt,
           lastOutFile: dryRun.outFile,
-          cadences: markCadencesRan(stateAfterHealthCheck, activeCadences, new Date().toISOString()),
+          cadences: markCadencesRan(stateAfterHealthCheck, activeCadences, completedAt),
           skippedReason: 'issue_set_unchanged',
         },
         null,
@@ -1541,6 +1597,14 @@ async function runOnce(configPath, statePath) {
       ),
       'utf8',
     );
+    await appendSchedulerProof('runner_completed', {
+      configPath,
+      statePath,
+      completedAt,
+      skippedReason: 'issue_set_unchanged',
+      activeCadences: activeCadences.map((cadence) => cadence.key),
+      outFile: dryRun.outFile,
+    });
     return;
   }
 
@@ -1566,6 +1630,7 @@ async function runOnce(configPath, statePath) {
     );
   }
 
+  const completedAt = new Date().toISOString();
   await fs.mkdir(path.dirname(statePath), { recursive: true });
   await fs.writeFile(
     statePath,
@@ -1575,9 +1640,9 @@ async function runOnce(configPath, statePath) {
         sourceHashes: currentHashes,
         sourceCursors,
         lastIssueFingerprint: issueFingerprint,
-        lastRunAt: new Date().toISOString(),
+        lastRunAt: completedAt,
         lastOutFile: dryRun.outFile,
-        cadences: markCadencesRan(stateAfterHealthCheck, activeCadences, new Date().toISOString()),
+        cadences: markCadencesRan(stateAfterHealthCheck, activeCadences, completedAt),
         lastGrowthRunNotifications: await deliverGrowthRunSummary({
           config,
           configPath,
@@ -1595,6 +1660,16 @@ async function runOnce(configPath, statePath) {
     ),
     'utf8',
   );
+  await appendSchedulerProof('runner_completed', {
+    configPath,
+    statePath,
+    completedAt,
+    skippedReason: null,
+    activeCadences: activeCadences.map((cadence) => cadence.key),
+    outFile: dryRun.outFile,
+    issueCount: Number(dryRun.issuesPayload?.issue_count || 0),
+    createdGitHubArtifact: shouldCreateGitHubArtifact,
+  });
 }
 
 async function main() {
@@ -1617,6 +1692,11 @@ async function main() {
       await maybeSelfUpdateFromClawHub(args);
       await runOnce(configPath, statePath);
     } catch (error) {
+      await appendSchedulerProof('runner_failed', {
+        configPath,
+        statePath,
+        error: error instanceof Error ? error.message : String(error),
+      }).catch(() => {});
       process.stderr.write(
         `[${new Date().toISOString()}] Run failed: ${error instanceof Error ? error.message : String(error)}\n`,
       );
@@ -1625,7 +1705,11 @@ async function main() {
   }
 }
 
-main().catch((error) => {
+main().catch(async (error) => {
+  await appendSchedulerProof('runner_failed', {
+    error: error instanceof Error ? error.message : String(error),
+    argv: process.argv.slice(2),
+  }).catch(() => {});
   process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
   process.exitCode = 1;
 });

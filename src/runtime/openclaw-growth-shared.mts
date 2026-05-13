@@ -111,6 +111,40 @@ export function getDefaultSourceCommand(service) {
   return null;
 }
 
+export function getAutomationConfig(config) {
+  const automation = config?.automation && typeof config.automation === 'object' ? config.automation : {};
+  const openclawCron =
+    automation.openclawCron && typeof automation.openclawCron === 'object' ? automation.openclawCron : {};
+  return {
+    ...automation,
+    openclawCron: {
+      enabled: openclawCron.enabled !== false,
+      mode: String(openclawCron.mode || 'main').trim() || 'main',
+      schedule: String(openclawCron.schedule || '*/30 * * * *').trim() || '*/30 * * * *',
+      timezone: String(openclawCron.timezone || process.env.TZ || 'UTC').trim() || 'UTC',
+      name: String(openclawCron.name || 'OpenClaw Growth Engineer scheduler').trim() ||
+        'OpenClaw Growth Engineer scheduler',
+    },
+  };
+}
+
+export function buildGrowthRunnerCommand(configPath) {
+  return `node scripts/openclaw-growth-runner.mjs --config ${configPath}`;
+}
+
+export function buildOpenClawGrowthSystemEvent(configPath, config = {}) {
+  const command = buildGrowthRunnerCommand(configPath);
+  const automation = getAutomationConfig(config);
+  return [
+    'Run OpenClaw Growth Engineer for this workspace.',
+    `Execute: ${command}`,
+    'The runner is the source of truth for connector health, daily, weekly, monthly, quarterly, six-month, and yearly cadence decisions.',
+    'After the command finishes, inspect data/openclaw-growth-engineer/state.json and data/openclaw-growth-engineer/runtime/scheduler-proof.jsonl.',
+    'If connector health is healthy, no production issue is found, and no actionable growth finding was generated, reply HEARTBEAT_OK.',
+    `Expected OpenClaw cron schedule: ${automation.openclawCron.schedule} ${automation.openclawCron.timezone}.`,
+  ].join(' ');
+}
+
 export function buildExtraSourceConfig(service, options: Record<string, any> = {}) {
   const normalizedService = normalizeServiceType(service);
   const key = normalizeSourceKey(options.key || normalizedService || `extra_${Date.now()}`);

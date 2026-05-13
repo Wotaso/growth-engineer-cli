@@ -21,9 +21,9 @@ const sourceSchema = z
 
 const githubDeliverySchema = z
   .object({
-    enabled: z.boolean().default(true),
+    enabled: z.boolean().default(false),
     mode: z.enum(['issue', 'pull_request']).default('issue'),
-    autoCreate: z.boolean().default(true),
+    autoCreate: z.boolean().default(false),
     draftPullRequests: z.boolean().default(true),
     proposalBranchPrefix: z.string().default('openclaw/proposals'),
   })
@@ -159,6 +159,22 @@ const securitySchema = z
   .passthrough()
   .default({});
 
+const automationSchema = z
+  .object({
+    openclawCron: z
+      .object({
+        enabled: z.boolean().default(true),
+        mode: z.enum(['main', 'isolated']).default('main'),
+        schedule: z.string().default('*/30 * * * *'),
+        timezone: z.string().default('UTC'),
+        name: z.string().default('OpenClaw Growth Engineer scheduler'),
+      })
+      .passthrough()
+      .default({}),
+  })
+  .passthrough()
+  .default({});
+
 const templateConfigSchema = z.object({
   version: z.number().int().default(7),
   generatedAt: z.string().optional(),
@@ -202,6 +218,7 @@ const templateConfigSchema = z.object({
     })
     .default({}),
   notifications: notificationsSchema,
+  automation: automationSchema,
   security: securitySchema,
   secrets: secretsSchema,
 });

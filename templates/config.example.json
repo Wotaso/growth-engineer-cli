@@ -176,6 +176,15 @@
       ]
     }
   },
+  "automation": {
+    "openclawCron": {
+      "enabled": true,
+      "mode": "main",
+      "schedule": "*/30 * * * *",
+      "timezone": "UTC",
+      "name": "OpenClaw Growth Engineer scheduler"
+    }
+  },
   "security": {
     "connectorSecrets": {
       "mode": "openclaw-secret-refs",
