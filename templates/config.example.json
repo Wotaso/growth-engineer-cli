@@ -133,7 +133,7 @@
     "github": {
       "enabled": false,
       "mode": "issue",
-      "autoCreate": false,
+      "autoCreate": true,
       "draftPullRequests": true,
       "proposalBranchPrefix": "openclaw/proposals"
     },

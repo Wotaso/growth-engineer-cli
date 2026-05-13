@@ -175,6 +175,24 @@ function replaceLegacyRuntimeScriptCommand(command) {
   );
 }
 
+function commandHasConfigArg(command) {
+  return /(?:^|\s)--config(?:=|\s|$)/.test(String(command || ''));
+}
+
+function commandShouldReceiveActiveConfig(command) {
+  return /(?:^|\s)(?:node\s+)?(?:\S*\/)?(?:export-analytics-summary|export-revenuecat-summary|export-sentry-summary|export-asc-summary)\.mjs(?:\s|$)/.test(
+    String(command || ''),
+  );
+}
+
+function withActiveConfigArg(command, configPath) {
+  const trimmed = String(command || '').trim();
+  if (!trimmed || !configPath || commandHasConfigArg(trimmed) || !commandShouldReceiveActiveConfig(trimmed)) {
+    return trimmed;
+  }
+  return `${trimmed} --config ${quote(configPath)}`;
+}
+
 async function readJson(filePath): Promise<any> {
   const raw = await fs.readFile(filePath, 'utf8');
   return JSON.parse(raw);
@@ -1311,7 +1329,7 @@ function resolveCursorAwareCommand(command, sourceConfig, cursorState) {
   return `${rawCommand} --last ${quote(lookback)}`;
 }
 
-async function resolveSourcePayloadWithCursor(sourceConfig, sourceName, cursorState, commandCwd = process.cwd()) {
+async function resolveSourcePayloadWithCursor(sourceConfig, sourceName, cursorState, commandCwd = process.cwd(), configPath = null) {
   if (!sourceConfig || sourceConfig.enabled === false) {
     return {
       payload: null,
@@ -1325,7 +1343,7 @@ async function resolveSourcePayloadWithCursor(sourceConfig, sourceName, cursorSt
       throw new Error(`Source "${sourceName}" has mode=command but no command configured.`);
     }
     const resolvedCommand = resolveCursorAwareCommand(
-      replaceLegacyRuntimeScriptCommand(sourceConfig.command),
+      withActiveConfigArg(replaceLegacyRuntimeScriptCommand(sourceConfig.command), configPath),
       sourceConfig,
       cursorState,
     );
@@ -1363,13 +1381,13 @@ async function resolveSourcePayloadWithCursor(sourceConfig, sourceName, cursorSt
   };
 }
 
-async function loadSourcePayloads(config, state) {
+async function loadSourcePayloads(config, state, configPath) {
   const payloads = {};
   const sourceCursors = { ...(state?.sourceCursors || {}) };
   const commandCwd = getProjectCommandCwd(config);
   for (const source of getAllSourceEntries(config)) {
     const currentCursor = sourceCursors[source.key] || null;
-    const result = await resolveSourcePayloadWithCursor(source, source.key, currentCursor, commandCwd);
+    const result = await resolveSourcePayloadWithCursor(source, source.key, currentCursor, commandCwd, configPath);
     const payload = result.payload;
     if (payload) {
       payloads[source.key] = payload;
@@ -1436,7 +1454,7 @@ async function runOnce(configPath, statePath) {
   });
   const activeCadences = getDueCadences(config, stateAfterHealthCheck);
 
-  const { payloads, sourceCursors } = await loadSourcePayloads(config, stateAfterHealthCheck);
+  const { payloads, sourceCursors } = await loadSourcePayloads(config, stateAfterHealthCheck, configPath);
   const currentHashes = computeSourceHashes(payloads);
   const changed = hasSourceChanges(stateAfterHealthCheck.sourceHashes, currentHashes);
 

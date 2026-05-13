@@ -21,9 +21,9 @@ const sourceSchema = z
 
 const githubDeliverySchema = z
   .object({
-    enabled: z.boolean().default(false),
+    enabled: z.boolean().default(true),
     mode: z.enum(['issue', 'pull_request']).default('issue'),
-    autoCreate: z.boolean().default(false),
+    autoCreate: z.boolean().default(true),
     draftPullRequests: z.boolean().default(true),
     proposalBranchPrefix: z.string().default('openclaw/proposals'),
   })

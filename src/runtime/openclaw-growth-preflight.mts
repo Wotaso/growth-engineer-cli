@@ -167,6 +167,24 @@ function replaceLegacyRuntimeScriptCommand(command) {
   );
 }
 
+function commandHasConfigArg(command) {
+  return /(?:^|\s)--config(?:=|\s|$)/.test(String(command || ''));
+}
+
+function commandShouldReceiveActiveConfig(command) {
+  return /(?:^|\s)(?:node\s+)?(?:\S*\/)?(?:export-analytics-summary|export-revenuecat-summary|export-sentry-summary|export-asc-summary)\.mjs(?:\s|$)/.test(
+    String(command || ''),
+  );
+}
+
+function withActiveConfigArg(command, configPath) {
+  const trimmed = String(command || '').trim();
+  if (!trimmed || !configPath || commandHasConfigArg(trimmed) || !commandShouldReceiveActiveConfig(trimmed)) {
+    return trimmed;
+  }
+  return `${trimmed} --config ${shellQuote(configPath)}`;
+}
+
 function resolveShellCommand(): string {
   const candidates = [
     process.env.OPENCLAW_SHELL,
@@ -850,7 +868,7 @@ function onlyAllows(onlyConnectors, connector) {
   return !Array.isArray(onlyConnectors) || onlyConnectors.length === 0 || onlyConnectors.includes(connector);
 }
 
-async function runConnectionChecks({ checks, config, timeoutMs, progressJson = false, onlyConnectors = [] }) {
+async function runConnectionChecks({ checks, config, configPath, timeoutMs, progressJson = false, onlyConnectors = [] }) {
   const tasks = [];
   const analyticsTokenEnv = getSecretName(config, 'analyticsTokenEnv', 'ANALYTICSCLI_ACCESS_TOKEN');
   const revenuecatTokenEnv = getSecretName(config, 'revenuecatTokenEnv', 'REVENUECAT_API_KEY');
@@ -886,7 +904,10 @@ async function runConnectionChecks({ checks, config, timeoutMs, progressJson = f
         );
 
         if (analyticsSource?.mode === 'command') {
-          const command = replaceLegacyRuntimeScriptCommand(String(analyticsSource.command || '').trim());
+          const command = withActiveConfigArg(
+            replaceLegacyRuntimeScriptCommand(String(analyticsSource.command || '').trim()),
+            configPath,
+          );
           if (!command) {
             addCheck(checks, 'connection:analytics-command', false, 'analytics source uses command mode but no command configured');
           } else {
@@ -976,7 +997,10 @@ async function runConnectionChecks({ checks, config, timeoutMs, progressJson = f
           );
         }
         if (sentrySource?.mode === 'command') {
-          const command = replaceLegacyRuntimeScriptCommand(String(sentrySource.command || '').trim());
+            const command = withActiveConfigArg(
+              replaceLegacyRuntimeScriptCommand(String(sentrySource.command || '').trim()),
+              configPath,
+            );
           if (!command) {
             addCheck(groupChecks, 'connection:sentry-command', false, 'sentry source uses command mode but no command configured');
           } else {
@@ -1002,7 +1026,10 @@ async function runConnectionChecks({ checks, config, timeoutMs, progressJson = f
   if (!onlyAllows(onlyConnectors, 'feedback')) {
     // Skip feedback during focused connector checks.
   } else if (sourceEnabled(config, 'feedback') && feedbackSource?.mode === 'command') {
-    const command = replaceLegacyRuntimeScriptCommand(String(feedbackSource.command || '').trim());
+    const command = withActiveConfigArg(
+      replaceLegacyRuntimeScriptCommand(String(feedbackSource.command || '').trim()),
+      configPath,
+    );
     if (!command) {
       addCheck(checks, 'connection:feedback', false, 'feedback source uses command mode but no command configured');
     } else {
@@ -1054,7 +1081,10 @@ async function runConnectionChecks({ checks, config, timeoutMs, progressJson = f
     }
 
     if (extraSource.mode === 'command') {
-      const command = replaceLegacyRuntimeScriptCommand(String(extraSource.command || '').trim());
+          const command = withActiveConfigArg(
+            replaceLegacyRuntimeScriptCommand(String(extraSource.command || '').trim()),
+            configPath,
+          );
       if (!command) {
         addCheck(checks, checkName, false, 'source uses command mode but no command configured');
         continue;
@@ -1379,6 +1409,7 @@ async function main() {
       await runConnectionChecks({
         checks,
         config,
+        configPath,
         progressJson: args.progressJson,
         timeoutMs: args.timeoutMs,
         onlyConnectors: args.onlyConnectors,
