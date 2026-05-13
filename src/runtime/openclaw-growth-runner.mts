@@ -187,8 +187,13 @@ function commandShouldReceiveActiveConfig(command) {
 
 function withActiveConfigArg(command, configPath) {
   const trimmed = String(command || '').trim();
-  if (!trimmed || !configPath || commandHasConfigArg(trimmed) || !commandShouldReceiveActiveConfig(trimmed)) {
+  if (!trimmed || !configPath || !commandShouldReceiveActiveConfig(trimmed)) {
     return trimmed;
+  }
+  if (commandHasConfigArg(trimmed)) {
+    return trimmed
+      .replace(/(^|\s)--config=(?:"[^"]*"|'[^']*'|\S+)/, `$1--config ${quote(configPath)}`)
+      .replace(/(^|\s)--config\s+(?:"[^"]*"|'[^']*'|\S+)/, `$1--config ${quote(configPath)}`);
   }
   return `${trimmed} --config ${quote(configPath)}`;
 }
