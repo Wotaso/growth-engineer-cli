@@ -703,10 +703,15 @@ function getConnectorHealthChannels(config) {
   return channels;
 }
 
+function resolveOpenClawChatDeliveryPath(channelPath, fallbackPath) {
+  const targetPath = String(channelPath || fallbackPath || '').trim();
+  if (!targetPath) return path.resolve(process.cwd(), fallbackPath);
+  return path.isAbsolute(targetPath) ? targetPath : path.resolve(process.cwd(), targetPath);
+}
+
 async function writeConfiguredOpenClawChatAlert(configPath, channel, message, statusPayload, unhealthyConnectors, fingerprint) {
-  const baseDir = path.dirname(path.resolve(configPath));
-  const markdownPath = path.resolve(baseDir, channel.markdownPath || '.openclaw/chat/connector-health.md');
-  const jsonPath = path.resolve(baseDir, channel.jsonPath || '.openclaw/chat/connector-health.json');
+  const markdownPath = resolveOpenClawChatDeliveryPath(channel.markdownPath, '.openclaw/chat/connector-health.md');
+  const jsonPath = resolveOpenClawChatDeliveryPath(channel.jsonPath, '.openclaw/chat/connector-health.json');
   await fs.mkdir(path.dirname(markdownPath), { recursive: true });
   await fs.mkdir(path.dirname(jsonPath), { recursive: true });
   await fs.writeFile(markdownPath, message, 'utf8');
@@ -922,9 +927,8 @@ function buildGrowthRunSummaryMessage({ issuesPayload, activeCadences, sourceFil
 }
 
 async function writeConfiguredOpenClawChatGrowthSummary(configPath, channel, message, issuesPayload, activeCadences, fingerprint, charts) {
-  const baseDir = path.dirname(path.resolve(configPath));
-  const markdownPath = path.resolve(baseDir, channel.markdownPath || '.openclaw/chat/growth-summary.md');
-  const jsonPath = path.resolve(baseDir, channel.jsonPath || '.openclaw/chat/growth-summary.json');
+  const markdownPath = resolveOpenClawChatDeliveryPath(channel.markdownPath, '.openclaw/chat/growth-summary.md');
+  const jsonPath = resolveOpenClawChatDeliveryPath(channel.jsonPath, '.openclaw/chat/growth-summary.json');
   await fs.mkdir(path.dirname(markdownPath), { recursive: true });
   await fs.mkdir(path.dirname(jsonPath), { recursive: true });
   await fs.writeFile(markdownPath, message, 'utf8');
