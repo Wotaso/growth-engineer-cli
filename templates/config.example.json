@@ -146,6 +146,11 @@
       "urlEnv": "OPENCLAW_WEBHOOK_URL",
       "method": "POST",
       "headers": {}
+    },
+    "command": {
+      "enabled": false,
+      "label": "command",
+      "command": ""
     }
   },
   "charting": {

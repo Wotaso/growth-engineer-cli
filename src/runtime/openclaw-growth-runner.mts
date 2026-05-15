@@ -661,20 +661,41 @@ async function writeConnectorHealthAlert(runtimeDir, message, statusPayload, unh
   return { markdownPath, jsonPath };
 }
 
-function getConnectorHealthChannels(config) {
-  const configuredChannels = Array.isArray(config?.notifications?.connectorHealth?.channels)
-    ? config.notifications.connectorHealth.channels.filter((channel) => channel?.enabled !== false)
-    : [];
-  if (configuredChannels.length > 0) return configuredChannels;
+function notificationChannelKey(channel) {
+  const type = String(channel?.type || 'openclaw-chat');
+  if (type === 'openclaw-chat') return 'openclaw-chat';
+  if (type === 'slack') return `slack:${channel?.label || channel?.webhookEnv || 'slack'}`;
+  if (type === 'webhook') return `webhook:${channel?.label || channel?.urlEnv || channel?.webhookEnv || 'webhook'}`;
+  if (type === 'command') return `command:${channel?.label || channel?.command || 'command'}`;
+  return `${type}:${channel?.label || type}`;
+}
 
+function mergeNotificationChannelsWithDeliveries(configuredChannels, deliveryChannels) {
+  const configured = Array.isArray(configuredChannels) ? configuredChannels : [];
+  const seen = new Set(configured.map((channel) => notificationChannelKey(channel)));
+  const channels = configured.filter((channel) => channel?.enabled !== false);
+  for (const channel of deliveryChannels) {
+    if (!seen.has(notificationChannelKey(channel))) {
+      channels.push(channel);
+    }
+  }
+  return channels;
+}
+
+function getDeliveryNotificationChannels(config, kind) {
   const channels = [];
   const deliveries = config?.deliveries || {};
   if (deliveries.openclawChat?.enabled) {
+    const isConnectorHealth = kind === 'connectorHealth';
     channels.push({
       type: 'openclaw-chat',
       label: 'openclaw_chat',
-      markdownPath: deliveries.openclawChat.connectorHealthMarkdownPath || deliveries.openclawChat.markdownPath,
-      jsonPath: deliveries.openclawChat.connectorHealthJsonPath || deliveries.openclawChat.jsonPath,
+      markdownPath: isConnectorHealth
+        ? deliveries.openclawChat.connectorHealthMarkdownPath || deliveries.openclawChat.markdownPath
+        : deliveries.openclawChat.growthRunMarkdownPath || '.openclaw/chat/growth-summary.md',
+      jsonPath: isConnectorHealth
+        ? deliveries.openclawChat.connectorHealthJsonPath || deliveries.openclawChat.jsonPath
+        : deliveries.openclawChat.growthRunJsonPath || '.openclaw/chat/growth-summary.json',
     });
   }
   if (deliveries.slack?.enabled) {
@@ -693,14 +714,28 @@ function getConnectorHealthChannels(config) {
       headers: deliveries.webhook.headers || {},
     });
   }
+  if (deliveries.command?.enabled) {
+    channels.push({
+      type: 'command',
+      label: deliveries.command.label || 'command',
+      command: deliveries.command.command || '',
+    });
+  }
   if (deliveries.discord?.enabled) {
     channels.push({
       type: 'command',
-      label: 'discord',
-      command: deliveries.discord.command || 'node scripts/discord-openclaw-bridge.mjs send --stdin',
+      label: deliveries.discord.label || 'discord',
+      command: deliveries.discord.command || '',
     });
   }
   return channels;
+}
+
+function getConnectorHealthChannels(config) {
+  const configuredChannels = Array.isArray(config?.notifications?.connectorHealth?.channels)
+    ? config.notifications.connectorHealth.channels
+    : [];
+  return mergeNotificationChannelsWithDeliveries(configuredChannels, getDeliveryNotificationChannels(config, 'connectorHealth'));
 }
 
 function resolveOpenClawChatDeliveryPath(channelPath, fallbackPath) {
@@ -831,44 +866,9 @@ async function deliverConnectorHealthAlert({ config, configPath, message, status
 
 function getGrowthRunChannels(config) {
   const configuredChannels = Array.isArray(config?.notifications?.growthRun?.channels)
-    ? config.notifications.growthRun.channels.filter((channel) => channel?.enabled !== false)
+    ? config.notifications.growthRun.channels
     : [];
-  if (configuredChannels.length > 0) return configuredChannels;
-
-  const channels = [];
-  const deliveries = config?.deliveries || {};
-  if (deliveries.openclawChat?.enabled) {
-    channels.push({
-      type: 'openclaw-chat',
-      label: 'openclaw_chat',
-      markdownPath: deliveries.openclawChat.growthRunMarkdownPath || '.openclaw/chat/growth-summary.md',
-      jsonPath: deliveries.openclawChat.growthRunJsonPath || '.openclaw/chat/growth-summary.json',
-    });
-  }
-  if (deliveries.slack?.enabled) {
-    channels.push({
-      type: 'slack',
-      label: 'slack',
-      webhookEnv: deliveries.slack.webhookEnv || 'SLACK_WEBHOOK_URL',
-    });
-  }
-  if (deliveries.webhook?.enabled) {
-    channels.push({
-      type: 'webhook',
-      label: 'webhook',
-      urlEnv: deliveries.webhook.urlEnv || 'OPENCLAW_WEBHOOK_URL',
-      method: deliveries.webhook.method || 'POST',
-      headers: deliveries.webhook.headers || {},
-    });
-  }
-  if (deliveries.discord?.enabled) {
-    channels.push({
-      type: 'command',
-      label: 'discord',
-      command: deliveries.discord.command || 'node scripts/discord-openclaw-bridge.mjs send --stdin',
-    });
-  }
-  return channels;
+  return mergeNotificationChannelsWithDeliveries(configuredChannels, getDeliveryNotificationChannels(config, 'growthRun'));
 }
 
 async function readChartAttachments(chartManifestPath) {

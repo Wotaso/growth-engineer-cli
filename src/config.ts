@@ -57,7 +57,8 @@ const webhookDeliverySchema = z
 const commandDeliverySchema = z
   .object({
     enabled: z.boolean().default(false),
-    command: z.string().default('node scripts/discord-openclaw-bridge.mjs send --stdin'),
+    label: z.string().default('command'),
+    command: z.string().default(''),
   })
   .default({});
 
@@ -208,6 +209,7 @@ const templateConfigSchema = z.object({
       github: githubDeliverySchema,
       slack: slackDeliverySchema,
       webhook: webhookDeliverySchema,
+      command: commandDeliverySchema,
       discord: commandDeliverySchema,
     })
     .default({}),
