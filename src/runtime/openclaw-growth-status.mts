@@ -9,8 +9,6 @@ import { applyOpenClawSecretRefs, loadOpenClawGrowthSecrets } from './openclaw-g
 
 const DEFAULT_CONFIG_PATH = 'data/openclaw-growth-engineer/config.json';
 const DEFAULT_TIMEOUT_MS = 15_000;
-const ASC_WEB_AUTH_REFRESH_COMMAND =
-  'Set ASC_WEB_APPLE_ID to the Apple Account email, then run: asc web auth login --apple-id "$ASC_WEB_APPLE_ID" && asc web auth status --output json --pretty';
 const RUNTIME_DIR = path.dirname(fileURLToPath(import.meta.url));
 
 type ShellResult = {
@@ -336,30 +334,9 @@ async function summarizeAsc(preflight, config, timeoutMs) {
     return connector('not_enabled', 'App Store Connect CLI source is disabled');
   }
   if (ascConnection?.status === 'pass') {
-    const webAuth = await runShell('asc web auth status --output json', { timeoutMs });
-    if (!webAuth.ok) {
-      return connector('partial', 'ASC API exporter works, but ASC web analytics login is not verified', {
-        appScope: 'all_accessible_apps',
-        nextAction: ASC_WEB_AUTH_REFRESH_COMMAND,
-      });
-    }
-    try {
-      const payload = JSON.parse(webAuth.stdout || '{}');
-      if (payload?.authenticated !== true) {
-        return connector('partial', 'ASC API exporter works, but ASC web analytics is not logged in', {
-          appScope: 'all_accessible_apps',
-          nextAction: ASC_WEB_AUTH_REFRESH_COMMAND,
-        });
-      }
-    } catch {
-      return connector('partial', 'ASC API exporter works, but ASC web analytics status returned invalid JSON', {
-        appScope: 'all_accessible_apps',
-        nextAction: ASC_WEB_AUTH_REFRESH_COMMAND,
-      });
-    }
-    return connector('connected', 'ASC exporter smoke test passed for accessible apps', {
+    return connector('connected', 'ASC API-key exporter smoke test passed for accessible apps', {
       appScope: 'all_accessible_apps',
-      webAnalytics: 'authenticated',
+      webAnalytics: 'optional_fallback_only',
     });
   }
   return connector('blocked', ascConnection?.detail || 'ASC connection was not verified', {
@@ -379,7 +356,7 @@ async function main() {
     phase: 'start',
     key: 'appStoreConnect',
     label: 'App Store Connect',
-    detail: 'ASC API + web analytics auth',
+    detail: 'ASC API-key reports auth',
   });
 
   const [githubStatus, ascStatus] = await Promise.all([

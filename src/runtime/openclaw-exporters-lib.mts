@@ -669,7 +669,8 @@ export function buildAscSummary(input) {
     ...extractReviewTexts(input?.feedbackPayload),
   ];
   const topThemes = rankKeywordThemes(reviewTexts).slice(0, 2);
-  const analyticsMetricsPayload = input?.analyticsMetricsPayload || input?.analyticsOverviewPayload;
+  const analyticsMetricsPayload =
+    input?.batchAnalyticsPayload || input?.analyticsMetricsPayload || input?.analyticsOverviewPayload;
   const unitsMetric = findAscMetric(analyticsMetricsPayload, 'units');
   const redownloadsMetric = findAscMetric(analyticsMetricsPayload, 'redownloads');
   const conversionRateMetric = findAscMetric(
@@ -684,11 +685,12 @@ export function buildAscSummary(input) {
   const totalCrashes = totalAscCrashes(input?.analyticsOverviewPayload);
   const analyticsWarnings = Array.isArray(input?.analyticsWarnings) ? input.analyticsWarnings : [];
   const webAuthMissing = isLikelyAscWebAuthMissing(analyticsWarnings);
+  const batchReports = Array.isArray(input?.batchReports) ? input.batchReports : [];
   const analyticsAvailability = webAuthMissing
     ? 'web_auth_missing'
     : analyticsWarnings.some((warning) => String(warning).includes('403'))
     ? 'not_public_or_not_analytics_ready'
-    : unitsMetric || conversionRateMetric || sourceBreakdown.length > 0 || totalCrashes > 0
+    : unitsMetric || conversionRateMetric || sourceBreakdown.length > 0 || totalCrashes > 0 || batchReports.length > 0
       ? 'available'
       : 'unknown';
   const overviewMetricCatalog = collectAscOverviewMetricCatalog(input?.analyticsOverviewPayload);
@@ -726,9 +728,9 @@ export function buildAscSummary(input) {
       delta_percent: -100,
       evidence: analyticsWarnings.slice(0, 3),
       suggested_actions: [
-        'Tell the OpenClaw user to set ASC_WEB_APPLE_ID to the Apple Account email and run: asc web auth login --apple-id "$ASC_WEB_APPLE_ID"',
-        'After login, verify with: asc web auth status --output json --pretty',
-        'Retry the ASC exporter so units, conversion, source traffic, and production crash totals are available',
+        'Ask the OpenClaw user whether to enable experimental ASC web analytics for the specific missing metric that API-key batch reports could not provide',
+        'If the user accepts, set ASC_WEB_APPLE_ID in the host terminal and run: asc web auth login --apple-id "$ASC_WEB_APPLE_ID"',
+        'Continue using API-key ASC batch reports if the user declines or the Apple Account web session expires again',
       ],
       keywords: ['asc', 'web_analytics', 'login', 'connector'],
     });
@@ -852,7 +854,7 @@ export function buildAscSummary(input) {
       delta_percent: null,
       evidence: notableOverviewMetrics.map(formatMetricMovement),
       suggested_actions: [
-        'Analyze every available ASC overview metric together with units, conversion, sources, AnalyticsCLI funnels, Sentry stability, and reviews before choosing a recommendation',
+        'Analyze every available ASC batch-report metric together with units, conversion, sources, AnalyticsCLI funnels, Sentry stability, and reviews before choosing a recommendation',
         'Keep financial metrics secondary unless the user asks, but still use them as validation for acquisition and conversion quality',
       ],
       keywords: ['asc', 'analytics', 'overview_metrics', 'conversion', 'handlungsempfehlung'],
@@ -957,6 +959,7 @@ export function buildAscSummary(input) {
       analyticsWindow: input?.analyticsWindow || null,
       analyticsAvailability,
       analyticsWarnings,
+      batchReports,
       analytics: {
         units: unitsMetric
           ? {

@@ -1792,25 +1792,6 @@ async function runImmediateConnectorHealthCheck({
   );
   let payload = parseJsonFromStdout(result.stdout);
 
-  if (connector === 'asc') {
-    try {
-      const ascWebAuthChanged = await ensureAscWebAnalyticsAuth(rl, secrets);
-      if (ascWebAuthChanged) {
-        result = await runSetupCommandWithProgress(
-          command,
-          env,
-          [connector],
-          'Retesting ASC after web analytics login...',
-        );
-        payload = parseJsonFromStdout(result.stdout);
-      }
-    } catch (error) {
-      process.stdout.write(
-        `ASC web analytics still needs attention: ${error instanceof Error ? error.message : String(error)}\n`,
-      );
-    }
-  }
-
   if (payloadHasConnectorFailures(payload, connector)) {
     process.stdout.write(`\n${connectorLabel(connector)} needs attention before continuing.\n`);
     printConciseSetupBlockers(payload, command, {
@@ -2670,112 +2651,6 @@ async function askAscPrivateKeyPath(rl) {
   }
 }
 
-function isAscWebAuthAuthenticated(stdout) {
-  try {
-    const payload = JSON.parse(String(stdout || '{}'));
-    return payload?.authenticated === true;
-  } catch {
-    return false;
-  }
-}
-
-function resolveAscWebAppleId() {
-  return (
-    process.env.ASC_WEB_APPLE_ID?.trim() ||
-    process.env.ASC_APPLE_ID?.trim() ||
-    process.env.APPLE_ID?.trim() ||
-    ''
-  );
-}
-
-function ascWebAuthEnv() {
-  return {
-    ...process.env,
-    ASC_TIMEOUT: process.env.ASC_TIMEOUT || '90s',
-    ASC_TIMEOUT_SECONDS: process.env.ASC_TIMEOUT_SECONDS || '90',
-  };
-}
-
-async function ensureAscWebAnalyticsAuth(rl = null, secrets: Record<string, string> = {}) {
-  process.stdout.write('\nChecking ASC web analytics authentication...\n');
-  process.stdout.write('Still working: verifying whether the ASC web session is active.\n');
-  if (!(await commandExists('asc'))) {
-    throw new Error(
-      'The asc CLI is not installed yet. Install it with `openclaw start --connectors asc`, then rerun the connector wizard so it can run `asc web auth login --apple-id <email>`.',
-    );
-  }
-
-  const ascEnv = ascWebAuthEnv();
-  if (!process.env.ASC_TIMEOUT && !process.env.ASC_TIMEOUT_SECONDS) {
-    process.stdout.write('Using ASC_TIMEOUT=90s for ASC web auth because Apple web endpoints can be slow.\n');
-  }
-
-  const status = await runCommandCapture('asc web auth status --output json', { env: ascEnv });
-  if (status.ok && isAscWebAuthAuthenticated(status.stdout)) {
-    process.stdout.write('ASC web analytics authentication is active.\n');
-    return false;
-  }
-
-  let appleId = resolveAscWebAppleId();
-  if (!appleId && rl) {
-    appleId = (await ask(rl, 'Apple Account email for ASC web analytics login (ASC_WEB_APPLE_ID)', '')).trim();
-    if (appleId) {
-      secrets.ASC_WEB_APPLE_ID = appleId;
-      await saveSecretsImmediately({ ASC_WEB_APPLE_ID: appleId });
-    }
-  }
-  if (!appleId) {
-    throw new Error('ASC web analytics login needs an Apple Account email. Rerun the connector wizard and enter ASC_WEB_APPLE_ID.');
-  }
-
-  let attempts = 0;
-  while (true) {
-    attempts += 1;
-    process.stdout.write(`\nASC web login: ${appleId}\n`);
-    process.stdout.write('The next prompts are from asc. Enter the Apple Account password/2FA there.\n\n');
-    const loginCode = await runInteractiveProcess('asc', ['web', 'auth', 'login', '--apple-id', appleId], {
-      env: ascEnv,
-      rl,
-    });
-    if (loginCode === 0) {
-      break;
-    }
-
-    process.stdout.write('\nASC web login failed.\n');
-    process.stdout.write('Reason: asc/Apple rejected the Apple Account login. The .p8 API key is not used here.\n\n');
-    if (!rl || attempts >= 3) {
-      throw new Error(
-        'ASC web analytics login failed. Check the Apple Account email/password/2FA, then rerun the connector wizard.',
-      );
-    }
-    const retry = await askYesNo(rl, 'Retry ASC web analytics login now?', true);
-    if (!retry) {
-      throw new Error(
-        'ASC web analytics login was not completed. Rerun the connector wizard when the Apple Account login is ready.',
-      );
-    }
-    const nextAppleId = (
-      await ask(rl, 'Apple Account email for ASC web analytics login (press Enter to keep)', appleId)
-    ).trim();
-    if (nextAppleId && nextAppleId !== appleId) {
-      appleId = nextAppleId;
-      secrets.ASC_WEB_APPLE_ID = appleId;
-      await saveSecretsImmediately({ ASC_WEB_APPLE_ID: appleId });
-    }
-  }
-
-  process.stdout.write('\nStill working: verifying the ASC web analytics session after login...\n');
-  const verify = await runCommandCapture('asc web auth status --output json', { env: ascEnv });
-  if (!verify.ok || !isAscWebAuthAuthenticated(verify.stdout)) {
-    throw new Error(
-      'ASC web analytics login did not verify. Run `asc web auth status --output json --pretty` to inspect the session, then rerun the connector wizard.',
-    );
-  }
-
-  process.stdout.write('ASC web analytics authentication verified.\n');
-  return true;
-}
-
 function printSection(title: string, lines: string[] = []) {
   process.stdout.write(`\n${ANSI.bold}${title}${ANSI.reset}\n`);
   process.stdout.write(`${'-'.repeat(title.length)}\n`);
@@ -3012,8 +2887,8 @@ async function guideSentryConnector(rl, secrets: Record<string, string>) {
 
 async function guideAscConnector(rl, secrets: Record<string, string>) {
   printSection('App Store Connect CLI', [
-    'Use this mainly for App Store analytics, plus builds, TestFlight, reviews, ratings, and store context.',
-    'ASC web analytics also needs a website login; this wizard verifies it after helper setup.',
+    'Use this mainly for App Store analytics batch reports, plus builds, TestFlight, reviews, ratings, and store context.',
+    'The normal Growth Engineer path uses App Store Connect API-key reports. Experimental ASC web analytics is not part of setup.',
   ]);
   process.stdout.write('Create an App Store Connect API key here:\n  https://appstoreconnect.apple.com/access/integrations/api\n\n');
   process.stdout.write('Roles to choose for this key:\n');
@@ -3036,14 +2911,6 @@ async function guideAscConnector(rl, secrets: Record<string, string>) {
   const issuerId = await ask(rl, 'ASC_ISSUER_ID (leave empty to skip)', process.env.ASC_ISSUER_ID || '');
   if (keyId.trim()) secrets.ASC_KEY_ID = keyId.trim();
   if (issuerId.trim()) secrets.ASC_ISSUER_ID = issuerId.trim();
-
-  const appleId = await ask(
-    rl,
-    'Apple Account email for ASC web analytics login (ASC_WEB_APPLE_ID, leave empty to skip)',
-    resolveAscWebAppleId(),
-  );
-  if (appleId.trim()) secrets.ASC_WEB_APPLE_ID = appleId.trim();
-  process.stdout.write('ASC web password and 2FA are not stored by this wizard; asc asks for them interactively during web login.\n');
 
   const privateKeyContent = await askAscPrivateKeyContent(rl);
   if (privateKeyContent) {
@@ -3278,25 +3145,6 @@ async function runConnectorSetupSteps({
 
   if (sentryAccounts.length > 0 && await upsertSentryAccountsConfig(args.config, sentryAccounts)) {
     process.stdout.write(`Sentry-compatible account config is up to date in ${args.config}.\n`);
-  }
-
-  if (selected.includes('asc')) {
-    try {
-      const ascWebAuthChanged = await ensureAscWebAnalyticsAuth(rl, secrets);
-      if (ascWebAuthChanged) {
-        setupResult = await runSetupCommandWithProgress(
-          command,
-          env,
-          selected,
-          'Retesting connector setup after ASC web analytics login...',
-        );
-        setupPayload = parseJsonFromStdout(setupResult.stdout);
-      }
-    } catch (error) {
-      process.stdout.write(
-        `ASC web analytics still needs attention: ${error instanceof Error ? error.message : String(error)}\n`,
-      );
-    }
   }
 
   if (setupResult.ok && setupPayload?.ok !== false) {
