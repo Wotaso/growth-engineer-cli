@@ -1,6 +1,6 @@
 {
   "name": "@analyticscli/growth-engineer",
-  "version": "0.1.0-preview.14",
+  "version": "0.1.0-preview.15",
   "description": "Growth Engineer CLI for connector setup, scheduling, health checks, and OpenClaw-compatible growth runs.",
   "license": "MIT",
   "type": "module",
@@ -24,6 +24,7 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.json && mkdir -p dist/runtime && cp src/runtime/*.py dist/runtime/",
+    "dev": "tsx src/index.ts",
     "prepack": "npm run build",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
@@ -33,6 +34,7 @@
   },
   "devDependencies": {
     "@types/node": "^22.13.10",
+    "tsx": "^4.19.3",
     "typescript": "^5.8.2"
   }
 }

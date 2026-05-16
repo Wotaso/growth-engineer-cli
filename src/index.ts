@@ -3,7 +3,7 @@
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
-import { basename, delimiter, dirname, join, resolve } from 'node:path';
+import { delimiter, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Command } from 'commander';
 import {
@@ -1201,27 +1201,9 @@ const runOnce = async (configPath: string) => {
 
 const sleep = async (ms: number) => new Promise((resolvePromise) => setTimeout(resolvePromise, ms));
 
-const resolvePackageName = (): string | null => {
-  try {
-    const packageJson = JSON.parse(readFileSync(resolve(packageRoot, 'package.json'), 'utf8')) as { name?: string };
-    return packageJson.name || null;
-  } catch {
-    return null;
-  }
-};
-
-const cliName =
-  resolvePackageName() === '@analyticscli/growth-engineer' ||
-  basename(process.argv[1] || '').startsWith('growth-engineer')
-    ? 'growth-engineer'
-    : 'openclaw';
 program
-  .name(cliName)
-  .description(
-    cliName === 'growth-engineer'
-      ? 'Growth Engineer CLI for connector setup, scheduling, health checks, and OpenClaw-compatible growth runs'
-      : 'Standalone OpenClaw orchestration CLI',
-  );
+  .name('growth-engineer')
+  .description('Growth Engineer CLI for connector setup, scheduling, health checks, and OpenClaw-compatible growth runs');
 
 program
   .command('init')
