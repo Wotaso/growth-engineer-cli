@@ -6,7 +6,10 @@ import process from 'node:process';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import {
+  buildGrowthRunnerCommand,
   buildOpenClawGrowthSystemEvent,
+  deriveSchedulerProofPathFromStatePath,
+  deriveStatePathFromConfigPath,
   getActionMode,
   getAutomationConfig,
   getDefaultSourceCommand,
@@ -610,12 +613,14 @@ function isEffectivelyEmptyHeartbeat(value) {
 function renderHeartbeatBlock(configPath, config) {
   const interval = formatHeartbeatInterval(getHeartbeatInterval(config));
   const displayConfigPath = relativeWorkspacePath(configPath);
+  const displayStatePath = deriveStatePathFromConfigPath(displayConfigPath);
+  const runnerCommand = buildGrowthRunnerCommand(displayConfigPath, displayStatePath);
   return `${HEARTBEAT_MARKER_START}
 tasks:
 
 - name: openclaw-growth-engineer-run
   interval: ${interval}
-  prompt: "Run \`node scripts/openclaw-growth-runner.mjs --config ${displayConfigPath}\` from the workspace if the config and runtime files exist. The runner owns schedule.cadences, connectorHealthCheckIntervalMinutes, skipIfNoDataChange, and skipIfIssueSetUnchanged. If it reports connector-health alerts, production crashes, generated issues, or actionable growth findings, summarize only the action and evidence. If setup files are missing, tell the user to run \`node scripts/openclaw-growth-wizard.mjs --connectors\`. If there is no actionable output, reply HEARTBEAT_OK."
+  prompt: "Run \`${runnerCommand}\` from the workspace if the config and runtime files exist. The runner owns schedule.cadences, connectorHealthCheckIntervalMinutes, skipIfNoDataChange, and skipIfIssueSetUnchanged. If it reports connector-health alerts, production crashes, generated issues, or actionable growth findings, summarize only the action and evidence. If setup files are missing, tell the user to run \`node scripts/openclaw-growth-wizard.mjs --connectors --config ${displayConfigPath}\`. If there is no actionable output, reply HEARTBEAT_OK."
 
 # Keep this section small. Do not put secrets in HEARTBEAT.md.
 ${HEARTBEAT_MARKER_END}`;
@@ -674,11 +679,14 @@ function applyOpenClawCronOverrides(config, args) {
 }
 
 function getOpenClawCronProofCommands(configPath) {
+  const displayConfigPath = relativeWorkspacePath(configPath);
+  const statePath = deriveStatePathFromConfigPath(displayConfigPath);
+  const proofPath = deriveSchedulerProofPathFromStatePath(statePath);
   return {
     listCommand: 'openclaw cron list',
     runsCommand: 'openclaw cron runs --id <job-id>',
-    stateCommand: `jq '.connectorHealth, .cadences, .lastRunAt, .skippedReason' ${quote(path.resolve('data/openclaw-growth-engineer/state.json'))}`,
-    proofCommand: `tail -n 20 ${quote(path.resolve(DEFAULT_SCHEDULER_PROOF_PATH))}`,
+    stateCommand: `jq '.connectorHealth, .cadences, .lastRunAt, .skippedReason' ${quote(statePath)}`,
+    proofCommand: `tail -n 20 ${quote(proofPath)}`,
     manualWakeCommand: `openclaw system event --text ${quote(`Run OpenClaw Growth Engineer now using config ${relativeWorkspacePath(configPath)} and inspect scheduler proof.`)} --mode now`,
   };
 }
@@ -1640,7 +1648,8 @@ async function runPreflight(configPath, testConnections, progressJson = false, o
 }
 
 async function runFirstPass(configPath) {
-  const command = `${nodeRuntimeScriptCommand('openclaw-growth-runner.mjs')} --config ${quote(configPath)}`;
+  const statePath = path.resolve(deriveStatePathFromConfigPath(configPath));
+  const command = `${nodeRuntimeScriptCommand('openclaw-growth-runner.mjs')} --config ${quote(configPath)} --state ${quote(statePath)}`;
   return runShellCommand(command, 300_000);
 }
 
@@ -1648,6 +1657,7 @@ async function main() {
   await loadOpenClawGrowthSecrets();
   const args = parseArgs(process.argv.slice(2));
   const configPath = path.resolve(args.config);
+  const schedulerProofPath = path.resolve(deriveSchedulerProofPathFromStatePath(deriveStatePathFromConfigPath(configPath)));
 
   const configResult = await ensureConfig(configPath);
   const initialConfig = applyOpenClawCronOverrides(await readJson(configPath), args);
@@ -1903,7 +1913,7 @@ async function main() {
           ascAppId: ascAppSetup.appId || null,
           ascAppScope: ascAppSetup.appScope || null,
           connectorSetup,
-          schedulerProofPath: path.resolve(DEFAULT_SCHEDULER_PROOF_PATH),
+          schedulerProofPath,
           message: 'Preflight passed. First run skipped due to --setup-only.',
         },
         null,
@@ -1965,7 +1975,7 @@ async function main() {
         projectConfigured,
         actionMode,
         runnerOutput: runResult.stdout.trim(),
-        schedulerProofPath: path.resolve(DEFAULT_SCHEDULER_PROOF_PATH),
+        schedulerProofPath,
       },
       null,
       2,

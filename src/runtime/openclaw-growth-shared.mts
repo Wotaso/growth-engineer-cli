@@ -1,4 +1,15 @@
+import path from 'node:path';
+
 const BUILTIN_SOURCE_NAMES = ['analytics', 'revenuecat', 'sentry', 'feedback'];
+const DEFAULT_CONFIG_PATH = 'data/openclaw-growth-engineer/config.json';
+
+function quote(value) {
+  const raw = String(value);
+  if (/^[a-zA-Z0-9_./:@-]+$/.test(raw)) {
+    return raw;
+  }
+  return `'${raw.replace(/'/g, `'\\''`)}'`;
+}
 
 const SERVICE_KIND_ALIASES = {
   analytics: [
@@ -128,18 +139,36 @@ export function getAutomationConfig(config) {
   };
 }
 
-export function buildGrowthRunnerCommand(configPath) {
-  return `node scripts/openclaw-growth-runner.mjs --config ${configPath}`;
+export function deriveStatePathFromConfigPath(configPath) {
+  const normalized = String(configPath || DEFAULT_CONFIG_PATH).trim() || DEFAULT_CONFIG_PATH;
+  return path.join(path.dirname(normalized), 'state.json');
+}
+
+export function deriveRuntimeDirFromStatePath(statePath) {
+  const normalized = String(statePath || deriveStatePathFromConfigPath(DEFAULT_CONFIG_PATH)).trim() ||
+    deriveStatePathFromConfigPath(DEFAULT_CONFIG_PATH);
+  return path.join(path.dirname(normalized), 'runtime');
+}
+
+export function deriveSchedulerProofPathFromStatePath(statePath) {
+  return path.join(deriveRuntimeDirFromStatePath(statePath), 'scheduler-proof.jsonl');
+}
+
+export function buildGrowthRunnerCommand(configPath, statePath = deriveStatePathFromConfigPath(configPath)) {
+  const normalizedConfigPath = String(configPath || DEFAULT_CONFIG_PATH).trim() || DEFAULT_CONFIG_PATH;
+  return `node scripts/openclaw-growth-runner.mjs --config ${quote(normalizedConfigPath)} --state ${quote(statePath)}`;
 }
 
 export function buildOpenClawGrowthSystemEvent(configPath, config = {}) {
-  const command = buildGrowthRunnerCommand(configPath);
+  const statePath = deriveStatePathFromConfigPath(configPath);
+  const proofPath = deriveSchedulerProofPathFromStatePath(statePath);
+  const command = buildGrowthRunnerCommand(configPath, statePath);
   const automation = getAutomationConfig(config);
   return [
     'Run OpenClaw Growth Engineer for this workspace.',
     `Execute: ${command}`,
     'The runner is the source of truth for connector health, daily, weekly, monthly, quarterly, six-month, and yearly cadence decisions.',
-    'After the command finishes, inspect data/openclaw-growth-engineer/state.json and data/openclaw-growth-engineer/runtime/scheduler-proof.jsonl.',
+    `After the command finishes, inspect ${statePath} and ${proofPath}.`,
     'If connector health is healthy, no production issue is found, and no actionable growth finding was generated, reply HEARTBEAT_OK.',
     `Expected OpenClaw cron schedule: ${automation.openclawCron.schedule} ${automation.openclawCron.timezone}.`,
   ].join(' ');
