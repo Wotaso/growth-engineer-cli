@@ -174,6 +174,175 @@ export function buildOpenClawGrowthSystemEvent(configPath, config = {}) {
   ].join(' ');
 }
 
+export function buildOpenClawCronAddCommand(configPath, config = {}) {
+  const automation = getAutomationConfig(config).openclawCron;
+  const eventText = buildOpenClawGrowthSystemEvent(configPath, config);
+  return [
+    'openclaw cron add',
+    '--name',
+    quote(automation.name),
+    '--cron',
+    quote(automation.schedule),
+    '--tz',
+    quote(automation.timezone),
+    '--session',
+    automation.mode === 'isolated' ? 'isolated' : 'main',
+    automation.mode === 'isolated' ? '--message' : '--system-event',
+    quote(eventText),
+    automation.mode === 'isolated' ? '--announce' : '--wake now',
+  ].join(' ');
+}
+
+function normalizeCronComparable(value) {
+  return String(value || '')
+    .replace(/\\"/g, '"')
+    .replace(/\\'/g, "'")
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function collectObjects(value, result: any[] = []) {
+  if (!value || typeof value !== 'object') return result;
+  if (Array.isArray(value)) {
+    for (const item of value) collectObjects(item, result);
+    return result;
+  }
+  result.push(value);
+  for (const item of Object.values(value)) collectObjects(item, result);
+  return result;
+}
+
+function parseJsonMaybe(value) {
+  const text = String(value || '').trim();
+  if (!text) return null;
+  try {
+    return JSON.parse(text);
+  } catch {
+    const starts = [text.indexOf('{'), text.indexOf('[')].filter((index) => index >= 0);
+    if (starts.length === 0) return null;
+    try {
+      return JSON.parse(text.slice(Math.min(...starts)));
+    } catch {
+      return null;
+    }
+  }
+}
+
+export function buildOpenClawCronVerification(configPath, config = {}) {
+  const automation = getAutomationConfig(config).openclawCron;
+  const statePath = deriveStatePathFromConfigPath(configPath);
+  const proofPath = deriveSchedulerProofPathFromStatePath(statePath);
+  return {
+    name: automation.name,
+    schedule: automation.schedule,
+    timezone: automation.timezone,
+    statePath,
+    proofPath,
+    requiredFragments: [
+      automation.name,
+      automation.schedule,
+      automation.timezone,
+      'Run OpenClaw Growth Engineer for this workspace',
+      'openclaw-growth-runner.mjs',
+      '--config',
+      configPath,
+      '--state',
+      statePath,
+      proofPath,
+      'HEARTBEAT_OK',
+    ],
+  };
+}
+
+export function evaluateOpenClawCronRecords(records, verification) {
+  const jobs = collectObjects(records).filter((job) => {
+    const directName = typeof job.name === 'string' ? job.name : typeof job.title === 'string' ? job.title : '';
+    if (directName === verification.name) return true;
+    return normalizeCronComparable(JSON.stringify(job)).includes(normalizeCronComparable(verification.name));
+  });
+
+  if (jobs.length === 0) {
+    return { exists: false, verified: false, reason: 'not_found', jobs: [] };
+  }
+
+  for (const job of jobs) {
+    const blob = normalizeCronComparable(JSON.stringify(job));
+    const missing = verification.requiredFragments.filter(
+      (fragment) => !blob.includes(normalizeCronComparable(fragment)),
+    );
+    if (missing.length === 0) {
+      return { exists: true, verified: true, reason: 'verified', jobs };
+    }
+  }
+
+  return { exists: true, verified: false, reason: 'missing_required_fragments', jobs };
+}
+
+export function evaluateOpenClawCronText(text, verification) {
+  const blob = normalizeCronComparable(text);
+  if (!blob.includes(normalizeCronComparable(verification.name))) {
+    return { exists: false, verified: false, reason: 'not_found' };
+  }
+  const missing = verification.requiredFragments.filter(
+    (fragment) => !blob.includes(normalizeCronComparable(fragment)),
+  );
+  return {
+    exists: true,
+    verified: missing.length === 0,
+    reason: missing.length === 0 ? 'verified' : 'text_listing_unverified',
+  };
+}
+
+export async function inspectOpenClawCronInstall({
+  configPath,
+  config = {},
+  runCommand,
+  readFile,
+  home = process.env.HOME,
+}) {
+  const verification = buildOpenClawCronVerification(configPath, config);
+
+  for (const command of ['openclaw cron list --json', 'openclaw cron list --format json']) {
+    const result = await runCommand(command, 30_000);
+    if (!result?.ok) continue;
+    const parsed = parseJsonMaybe(result.stdout);
+    if (!parsed) continue;
+    const evaluated = evaluateOpenClawCronRecords(parsed, verification);
+    if (evaluated.exists) {
+      return { ...evaluated, source: command, verification };
+    }
+  }
+
+  if (readFile && home) {
+    const jobStorePaths = [
+      path.join(home, '.openclaw', 'cron', 'jobs.json'),
+      path.join(home, '.config', 'openclaw', 'cron', 'jobs.json'),
+    ];
+    for (const filePath of jobStorePaths) {
+      try {
+        const parsed = parseJsonMaybe(await readFile(filePath, 'utf8'));
+        if (!parsed) continue;
+        const evaluated = evaluateOpenClawCronRecords(parsed, verification);
+        if (evaluated.exists) {
+          return { ...evaluated, source: filePath, verification };
+        }
+      } catch {
+        // Ignore missing or unreadable implementation-specific stores.
+      }
+    }
+  }
+
+  const list = await runCommand('openclaw cron list', 30_000);
+  if (list?.ok) {
+    const evaluated = evaluateOpenClawCronText(list.stdout, verification);
+    if (evaluated.exists) {
+      return { ...evaluated, source: 'openclaw cron list', verification };
+    }
+  }
+
+  return { exists: false, verified: false, reason: 'not_found', source: 'openclaw cron list', verification };
+}
+
 export function buildExtraSourceConfig(service, options: Record<string, any> = {}) {
   const normalizedService = normalizeServiceType(service);
   const key = normalizeSourceKey(options.key || normalizedService || `extra_${Date.now()}`);

@@ -7,12 +7,13 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import {
   buildGrowthRunnerCommand,
-  buildOpenClawGrowthSystemEvent,
+  buildOpenClawCronAddCommand,
   deriveSchedulerProofPathFromStatePath,
   deriveStatePathFromConfigPath,
   getActionMode,
   getAutomationConfig,
   getDefaultSourceCommand,
+  inspectOpenClawCronInstall,
 } from './openclaw-growth-shared.mjs';
 import { applyOpenClawSecretRefs, loadOpenClawGrowthSecrets } from './openclaw-growth-env.mjs';
 
@@ -720,48 +721,47 @@ async function ensureOpenClawCronSchedule(configPath, config, mode = 'auto') {
     };
   }
 
-  const list = await runShellCommand('openclaw cron list', 30_000);
-  if (list.ok && list.stdout.includes(automation.openclawCron.name)) {
+  const displayConfigPath = relativeWorkspacePath(configPath);
+  const addCommand = buildOpenClawCronAddCommand(displayConfigPath, config);
+  const inspection = await inspectOpenClawCronInstall({
+    configPath: displayConfigPath,
+    config,
+    runCommand: runShellCommand,
+    readFile: fs.readFile,
+  });
+  if (inspection.exists && inspection.verified) {
     return {
       ok: true,
       enabled: true,
       installed: true,
-      status: 'already_configured',
-      detail: `OpenClaw cron job already exists: ${automation.openclawCron.name}`,
+      status: 'already_configured_verified',
+      detail: `OpenClaw cron job already exists and matches the Growth Engineer runner contract: ${automation.openclawCron.name}`,
       schedule: automation.openclawCron.schedule,
       timezone: automation.openclawCron.timezone,
+      source: inspection.source,
       proof,
     };
   }
 
-  const displayConfigPath = relativeWorkspacePath(configPath);
-  const eventText = buildOpenClawGrowthSystemEvent(displayConfigPath, config);
-  const addCommand = [
-    'openclaw cron add',
-    '--name',
-    quote(automation.openclawCron.name),
-    '--cron',
-    quote(automation.openclawCron.schedule),
-    '--tz',
-    quote(automation.openclawCron.timezone),
-    '--session',
-    automation.openclawCron.mode === 'isolated' ? 'isolated' : 'main',
-    automation.openclawCron.mode === 'isolated' ? '--message' : '--system-event',
-    quote(eventText),
-    automation.openclawCron.mode === 'isolated' ? '--announce' : '--wake now',
-  ].join(' ');
   const add = await runShellCommand(addCommand, 60_000);
+  const existingDetail = inspection.exists
+    ? `Existing OpenClaw cron job "${automation.openclawCron.name}" was not verifiably wired to the current runner contract (${inspection.reason} via ${inspection.source}). `
+    : '';
   return {
-    ok: add.ok || normalizedMode === 'auto',
+    ok: add.ok || (normalizedMode === 'auto' && !inspection.exists),
     enabled: true,
     installed: add.ok,
-    status: add.ok ? 'configured' : 'failed',
+    status: add.ok ? (inspection.exists ? 'reconfigured' : 'configured') : inspection.exists ? 'needs_repair' : 'failed',
     detail: add.ok
-      ? `Configured OpenClaw cron job "${automation.openclawCron.name}" (${automation.openclawCron.schedule}, ${automation.openclawCron.timezone})`
-      : add.stderr.trim() || add.stdout.trim() || `openclaw cron add exited ${add.code}`,
+      ? `${existingDetail}Configured OpenClaw cron job "${automation.openclawCron.name}" (${automation.openclawCron.schedule}, ${automation.openclawCron.timezone})`
+      : `${existingDetail}${add.stderr.trim() || add.stdout.trim() || `openclaw cron add exited ${add.code}`}`,
     schedule: automation.openclawCron.schedule,
     timezone: automation.openclawCron.timezone,
     command: addCommand,
+    remediation:
+      inspection.exists && !add.ok
+        ? `Remove the stale OpenClaw cron job named "${automation.openclawCron.name}" with your installed OpenClaw CLI, then rerun: ${addCommand}`
+        : undefined,
     proof,
   };
 }

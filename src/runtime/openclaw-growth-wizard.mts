@@ -9,13 +9,14 @@ import { emitKeypressEvents } from 'node:readline';
 import { createPrivateKey } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import {
+  buildOpenClawCronAddCommand,
   buildGrowthRunnerCommand,
-  buildOpenClawGrowthSystemEvent,
   deriveSchedulerProofPathFromStatePath,
   deriveStatePathFromConfigPath,
   buildExtraSourceConfig,
   getAutomationConfig,
   getDefaultSourceCommand,
+  inspectOpenClawCronInstall,
 } from './openclaw-growth-shared.mjs';
 import { loadOpenClawGrowthSecrets } from './openclaw-growth-env.mjs';
 
@@ -4073,26 +4074,6 @@ async function writeOpenClawJobManifest(configPath, config) {
   return manifestPath;
 }
 
-function buildOpenClawCronAddCommand(configPath, config) {
-  const automation = getAutomationConfig(config).openclawCron;
-  const displayConfigPath = path.relative(process.cwd(), configPath) || configPath;
-  const eventText = buildOpenClawGrowthSystemEvent(displayConfigPath, config);
-  return [
-    'openclaw cron add',
-    '--name',
-    quote(automation.name),
-    '--cron',
-    quote(automation.schedule),
-    '--tz',
-    quote(automation.timezone),
-    '--session',
-    automation.mode === 'isolated' ? 'isolated' : 'main',
-    automation.mode === 'isolated' ? '--message' : '--system-event',
-    quote(eventText),
-    automation.mode === 'isolated' ? '--announce' : '--wake now',
-  ].join(' ');
-}
-
 async function ensureOpenClawCronFromWizard(configPath, config) {
   const automation = getAutomationConfig(config).openclawCron;
   const displayConfigPath = path.relative(process.cwd(), configPath) || configPath;
@@ -4109,7 +4090,7 @@ async function ensureOpenClawCronFromWizard(configPath, config) {
     };
   }
 
-  const addCommand = buildOpenClawCronAddCommand(configPath, config);
+  const addCommand = buildOpenClawCronAddCommand(displayConfigPath, config);
   if (!(await commandExists('openclaw'))) {
     return {
       ok: true,
@@ -4122,25 +4103,40 @@ async function ensureOpenClawCronFromWizard(configPath, config) {
     };
   }
 
-  const list = await runCommandCapture('openclaw cron list');
-  if (list.ok && list.stdout.includes(automation.name)) {
+  const inspection = await inspectOpenClawCronInstall({
+    configPath: displayConfigPath,
+    config,
+    runCommand: runCommandCapture,
+    readFile: fs.readFile,
+  });
+  if (inspection.exists && inspection.verified) {
     return {
       ok: true,
       installed: true,
-      status: 'already_configured',
-      detail: `OpenClaw cron job already exists: ${automation.name}`,
+      status: 'already_configured_verified',
+      detail: `OpenClaw cron job already exists and matches the Growth Engineer runner contract: ${automation.name}`,
+      source: inspection.source,
       statePath,
       proofPath,
     };
   }
 
   const add = await runCommandCapture(addCommand);
+  const existingDetail = inspection.exists
+    ? `Existing OpenClaw cron job "${automation.name}" was not verifiably wired to the current runner contract (${inspection.reason} via ${inspection.source}). `
+    : '';
   return {
     ok: add.ok,
     installed: add.ok,
-    status: add.ok ? 'configured' : 'failed',
-    detail: add.ok ? `Configured OpenClaw cron job: ${automation.name}` : add.stderr || add.stdout || `exit ${add.code}`,
+    status: add.ok ? (inspection.exists ? 'reconfigured' : 'configured') : inspection.exists ? 'needs_repair' : 'failed',
+    detail: add.ok
+      ? `${existingDetail}Configured OpenClaw cron job: ${automation.name}`
+      : `${existingDetail}${add.stderr || add.stdout || `exit ${add.code}`}`,
     command: addCommand,
+    remediation:
+      inspection.exists && !add.ok
+        ? `Remove the stale OpenClaw cron job named "${automation.name}" with your installed OpenClaw CLI, then rerun: ${addCommand}`
+        : undefined,
     statePath,
     proofPath,
   };
@@ -4151,6 +4147,10 @@ function printOpenClawCronResult(result) {
   if (result.command && result.status === 'openclaw_cli_missing') {
     process.stdout.write('\nRun this on the VPS where OpenClaw Gateway is installed:\n');
     process.stdout.write(`${result.command}\n`);
+  }
+  if (result.remediation) {
+    process.stdout.write('\nOpenClaw cron repair:\n');
+    process.stdout.write(`${result.remediation}\n`);
   }
   process.stdout.write('\nVPS verification commands:\n');
   process.stdout.write('  openclaw cron list\n');
