@@ -620,10 +620,38 @@ function humanConnectorName(key) {
   return key;
 }
 
+function connectorWizardKey(key) {
+  if (key === 'analyticscli') return 'analytics';
+  if (key === 'appStoreConnect') return 'asc';
+  if (key === 'revenuecat') return 'revenuecat';
+  if (key === 'sentry') return 'sentry';
+  if (key === 'github') return 'github';
+  return '';
+}
+
+function buildConnectorWizardCommand(configPath, entry) {
+  const connector = connectorWizardKey(entry.key);
+  if (!connector) return null;
+  return `${nodeRuntimeScriptCommand('openclaw-growth-wizard.mjs')} --connectors ${quote(connector)} --config ${quote(configPath)}`;
+}
+
+function isAscWebAuthIssue(entry) {
+  if (entry.key !== 'appStoreConnect') return false;
+  const text = `${entry.detail || ''}\n${entry.nextAction || ''}`.toLowerCase();
+  return (
+    text.includes('asc web auth') ||
+    text.includes('asc_web_apple_id') ||
+    text.includes('web analytics') ||
+    text.includes('webauth') ||
+    text.includes('web auth')
+  );
+}
+
 function buildConnectorHealthAlert(statusPayload, unhealthyConnectors) {
+  const configPath = statusPayload?.configPath || DEFAULT_CONFIG_PATH;
   const lines = [
     `OpenClaw Growth connector health needs attention (${new Date().toISOString()}).`,
-    `Config: ${statusPayload?.configPath || DEFAULT_CONFIG_PATH}`,
+    `Config: ${configPath}`,
     '',
     'Unhealthy connector(s):',
   ];
@@ -632,6 +660,16 @@ function buildConnectorHealthAlert(statusPayload, unhealthyConnectors) {
     lines.push(`- ${humanConnectorName(entry.key)}: ${entry.status} - ${entry.detail}`);
     if (entry.nextAction) {
       lines.push(`  Next: ${entry.nextAction}`);
+    }
+    const command = buildConnectorWizardCommand(configPath, entry);
+    if (command) {
+      lines.push('  Run on the host terminal:');
+      lines.push(`  \`${command}\``);
+    }
+    if (isAscWebAuthIssue(entry)) {
+      lines.push('  ASC web-auth refresh only:');
+      lines.push('  `ASC_WEB_APPLE_ID="<apple-id>" asc web auth login --apple-id "$ASC_WEB_APPLE_ID"`');
+      lines.push('  Do not rerun the API-key ASC wizard unless the API-key smoke test also fails.');
     }
     if (entry.key === 'appStoreConnect' && entry.status === 'partial') {
       lines.push(
