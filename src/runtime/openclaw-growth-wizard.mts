@@ -10,12 +10,14 @@ import { createPrivateKey } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import {
   buildOpenClawCronAddCommand,
+  buildHermesCronCreateCommand,
   buildGrowthRunnerCommand,
   deriveSchedulerProofPathFromStatePath,
   deriveStatePathFromConfigPath,
   buildExtraSourceConfig,
   getAutomationConfig,
   getDefaultSourceCommand,
+  inspectHermesCronInstall,
   inspectOpenClawCronInstall,
 } from './openclaw-growth-shared.mjs';
 import { loadOpenClawGrowthSecrets } from './openclaw-growth-env.mjs';
@@ -208,13 +210,24 @@ function isFalseyEnv(value) {
   return ['0', 'false', 'no', 'n', 'off'].includes(String(value || '').trim().toLowerCase());
 }
 
+function resolveDefaultConfigPath() {
+  const explicit = String(process.env.OPENCLAW_GROWTH_CONFIG_PATH || '').trim();
+  if (explicit) return explicit;
+  const homeConfigPath = process.env.HOME ? path.join(process.env.HOME, 'data/openclaw-growth-engineer/config.json') : '';
+  const homeStatePath = process.env.HOME ? path.join(process.env.HOME, 'data/openclaw-growth-engineer/state.json') : '';
+  if (homeConfigPath && existsSync(homeConfigPath) && existsSync(homeStatePath)) return homeConfigPath;
+  if (!existsSync(DEFAULT_CONFIG_PATH) && homeConfigPath && existsSync(homeConfigPath)) return homeConfigPath;
+  return DEFAULT_CONFIG_PATH;
+}
+
 function parseArgs(argv) {
+  const defaultConfigPath = resolveDefaultConfigPath();
   const args = {
-    config: DEFAULT_CONFIG_PATH,
+    config: defaultConfigPath,
     connectorWizard: false,
     connectors: '',
     noSelfUpdate: false,
-    out: DEFAULT_CONFIG_PATH,
+    out: defaultConfigPath,
   };
 
   for (let i = 0; i < argv.length; i += 1) {
@@ -3924,7 +3937,7 @@ async function askIntervalConfig(rl, config) {
   printSection('Schedule and analysis depth', [
     'The runner wakes up often, but larger reviews only run on their daily/weekly/monthly cadence.',
     'Connector health checks are separate and default to every 6 hours.',
-    'On OpenClaw VPS installs, OpenClaw Gateway cron should wake the agent; heartbeat stays as a fallback checklist.',
+    'On OpenClaw or Hermes VPS installs, the agent scheduler should wake Growth Engineer; heartbeat stays as a fallback checklist.',
   ]);
   const currentSchedule = config?.schedule || {};
   const currentAutomation = getAutomationConfig(config);
@@ -3953,6 +3966,14 @@ async function askIntervalConfig(rl, config) {
   const openclawCronTimezone = enableOpenClawCron
     ? await ask(rl, 'OpenClaw cron timezone', currentAutomation.openclawCron.timezone || process.env.TZ || 'UTC')
     : currentAutomation.openclawCron.timezone;
+  const enableHermesCron = await askYesNo(
+    rl,
+    'Install a Hermes cron job when Hermes is available on this host?',
+    currentAutomation.hermesCron.enabled !== false,
+  );
+  const hermesCronSchedule = enableHermesCron
+    ? await ask(rl, 'Hermes cron expression for scheduler wakeups', currentAutomation.hermesCron.schedule || openclawCronSchedule || '*/30 * * * *')
+    : currentAutomation.hermesCron.schedule;
 
   config.schedule = {
     ...currentSchedule,
@@ -3975,6 +3996,14 @@ async function askIntervalConfig(rl, config) {
       schedule: openclawCronSchedule || '*/30 * * * *',
       timezone: openclawCronTimezone || 'UTC',
       name: currentAutomation.openclawCron.name || 'OpenClaw Growth Engineer scheduler',
+    },
+    hermesCron: {
+      ...(currentAutomation.hermesCron || {}),
+      enabled: enableHermesCron,
+      schedule: hermesCronSchedule || '*/30 * * * *',
+      name: currentAutomation.hermesCron.name || 'Hermes Growth Engineer scheduler',
+      skill: currentAutomation.hermesCron.skill || 'growth-engineer',
+      deliver: currentAutomation.hermesCron.deliver || 'local',
     },
   };
   return config;
@@ -4042,12 +4071,14 @@ async function writeOpenClawJobManifest(configPath, config) {
     scheduler: {
       recommended: 'openclaw-cron',
       openclawCron: automation.openclawCron,
+      hermesCron: automation.hermesCron,
       statePath,
       proofPath,
       verifyCommands: [
         'openclaw cron list',
         'openclaw tasks list',
         'openclaw tasks audit',
+        'hermes cron list',
         `tail -n 20 ${proofPath}`,
         `jq '.connectorHealth, .cadences, .lastRunAt, .skippedReason' ${statePath}`,
       ],
@@ -4142,6 +4173,79 @@ async function ensureOpenClawCronFromWizard(configPath, config) {
   };
 }
 
+async function ensureHermesCronFromWizard(configPath, config) {
+  const automation = getAutomationConfig(config).hermesCron;
+  const displayConfigPath = path.relative(process.cwd(), configPath) || configPath;
+  const statePath = deriveStatePathFromConfigPath(displayConfigPath);
+  const proofPath = path.resolve(deriveSchedulerProofPathFromStatePath(statePath));
+  const workdir = path.resolve(automation.workdir || process.cwd());
+  if (automation.enabled === false) {
+    return {
+      ok: true,
+      installed: false,
+      status: 'disabled',
+      detail: 'Hermes cron disabled by user choice.',
+      statePath,
+      proofPath,
+    };
+  }
+
+  const createCommand = buildHermesCronCreateCommand(displayConfigPath, config, { workdir });
+  if (!(await commandExists('hermes'))) {
+    return {
+      ok: true,
+      installed: false,
+      status: 'hermes_cli_missing',
+      detail: 'hermes CLI was not found on PATH. Run the shown command on the host where Hermes Gateway is installed.',
+      command: createCommand,
+      statePath,
+      proofPath,
+      workdir,
+    };
+  }
+
+  const inspection = await inspectHermesCronInstall({
+    configPath: displayConfigPath,
+    config,
+    runCommand: runCommandCapture,
+    readFile: fs.readFile,
+    workdir,
+  });
+  if (inspection.exists && inspection.verified) {
+    return {
+      ok: true,
+      installed: true,
+      status: 'already_configured_verified',
+      detail: `Hermes cron job already exists and matches the Growth Engineer runner contract: ${automation.name}`,
+      source: inspection.source,
+      statePath,
+      proofPath,
+      workdir,
+    };
+  }
+
+  const create = await runCommandCapture(createCommand);
+  const existingDetail = inspection.exists
+    ? `Existing Hermes cron job "${automation.name}" was not verifiably wired to the current runner contract (${inspection.reason} via ${inspection.source}). `
+    : '';
+  return {
+    ok: create.ok,
+    installed: create.ok,
+    status: create.ok ? (inspection.exists ? 'reconfigured' : 'configured') : inspection.exists ? 'needs_repair' : 'failed',
+    detail: create.ok
+      ? `${existingDetail}Configured Hermes cron job: ${automation.name}`
+      : `${existingDetail}${create.stderr || create.stdout || `exit ${create.code}`}`,
+    command: createCommand,
+    remediation:
+      inspection.exists && !create.ok
+        ? `Remove the stale Hermes cron job named "${automation.name}" with your installed Hermes CLI, then rerun: ${createCommand}`
+        : undefined,
+    statePath,
+    proofPath,
+    workdir,
+  };
+}
+
 function printOpenClawCronResult(result) {
   process.stdout.write(`OpenClaw cron: ${result.status} - ${result.detail}\n`);
   if (result.command && result.status === 'openclaw_cli_missing') {
@@ -4156,6 +4260,23 @@ function printOpenClawCronResult(result) {
   process.stdout.write('  openclaw cron list\n');
   process.stdout.write('  openclaw tasks list\n');
   process.stdout.write('  openclaw tasks audit\n');
+  process.stdout.write(`  tail -n 20 ${result.proofPath || path.resolve(DEFAULT_SCHEDULER_PROOF_PATH)}\n`);
+  process.stdout.write(`  jq '.connectorHealth, .cadences, .lastRunAt, .skippedReason' ${result.statePath || 'data/openclaw-growth-engineer/state.json'}\n`);
+}
+
+function printHermesCronResult(result) {
+  process.stdout.write(`Hermes cron: ${result.status} - ${result.detail}\n`);
+  if (result.command && result.status === 'hermes_cli_missing') {
+    process.stdout.write('\nRun this on the host where Hermes Gateway is installed:\n');
+    process.stdout.write(`${result.command}\n`);
+  }
+  if (result.remediation) {
+    process.stdout.write('\nHermes cron repair:\n');
+    process.stdout.write(`${result.remediation}\n`);
+  }
+  process.stdout.write('\nHermes verification commands:\n');
+  process.stdout.write('  hermes cron list\n');
+  process.stdout.write('  hermes gateway status\n');
   process.stdout.write(`  tail -n 20 ${result.proofPath || path.resolve(DEFAULT_SCHEDULER_PROOF_PATH)}\n`);
   process.stdout.write(`  jq '.connectorHealth, .cadences, .lastRunAt, .skippedReason' ${result.statePath || 'data/openclaw-growth-engineer/state.json'}\n`);
 }
@@ -4191,9 +4312,11 @@ async function main() {
       await writeJsonFile(configPath, config);
       const manifestPath = await writeOpenClawJobManifest(configPath, config);
       const cronResult = await ensureOpenClawCronFromWizard(configPath, config);
+      const hermesCronResult = await ensureHermesCronFromWizard(configPath, config);
       process.stdout.write(`\nSaved schedule config: ${configPath}\n`);
       process.stdout.write(`Saved OpenClaw job manifest: ${manifestPath}\n`);
       printOpenClawCronResult(cronResult);
+      printHermesCronResult(hermesCronResult);
       printSecretRunnerKitInstructions(secretAccess.kit);
       process.stdout.write('OpenClaw can run and update growth jobs plus non-secret connector config from the manifest; connector API keys stay behind the connector wizard.\n');
       return;
@@ -4204,9 +4327,11 @@ async function main() {
       await writeJsonFile(configPath, config);
       const manifestPath = await writeOpenClawJobManifest(configPath, config);
       const cronResult = await ensureOpenClawCronFromWizard(configPath, config);
+      const hermesCronResult = await ensureHermesCronFromWizard(configPath, config);
       process.stdout.write(`\nSaved output and interval config: ${configPath}\n`);
       process.stdout.write(`Saved OpenClaw job manifest: ${manifestPath}\n`);
       printOpenClawCronResult(cronResult);
+      printHermesCronResult(hermesCronResult);
       printSecretRunnerKitInstructions(secretAccess.kit);
       process.stdout.write('Daily checks prioritize Sentry and production anomalies; larger cadences analyze all configured projects and connectors.\n');
       return;
@@ -4242,10 +4367,12 @@ async function main() {
     await fs.writeFile(configPath, JSON.stringify(config, null, 2), 'utf8');
     const manifestPath = await writeOpenClawJobManifest(configPath, config);
     const cronResult = await ensureOpenClawCronFromWizard(configPath, config);
+    const hermesCronResult = await ensureHermesCronFromWizard(configPath, config);
 
     process.stdout.write(`\nSaved config: ${configPath}\n`);
     process.stdout.write(`Saved OpenClaw job manifest: ${manifestPath}\n`);
     printOpenClawCronResult(cronResult);
+    printHermesCronResult(hermesCronResult);
     printSecretRunnerKitInstructions(secretAccess.kit);
     process.stdout.write('\nNext steps:\n');
     process.stdout.write(`1) Set secrets in OpenClaw secret store (env var names in config.secrets)\n`);

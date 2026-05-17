@@ -126,6 +126,8 @@ export function getAutomationConfig(config) {
   const automation = config?.automation && typeof config.automation === 'object' ? config.automation : {};
   const openclawCron =
     automation.openclawCron && typeof automation.openclawCron === 'object' ? automation.openclawCron : {};
+  const hermesCron =
+    automation.hermesCron && typeof automation.hermesCron === 'object' ? automation.hermesCron : {};
   return {
     ...automation,
     openclawCron: {
@@ -135,6 +137,15 @@ export function getAutomationConfig(config) {
       timezone: String(openclawCron.timezone || process.env.TZ || 'UTC').trim() || 'UTC',
       name: String(openclawCron.name || 'OpenClaw Growth Engineer scheduler').trim() ||
         'OpenClaw Growth Engineer scheduler',
+    },
+    hermesCron: {
+      enabled: hermesCron.enabled !== false,
+      schedule: String(hermesCron.schedule || openclawCron.schedule || '*/30 * * * *').trim() || '*/30 * * * *',
+      name: String(hermesCron.name || 'Hermes Growth Engineer scheduler').trim() ||
+        'Hermes Growth Engineer scheduler',
+      skill: String(hermesCron.skill || 'growth-engineer').trim() || 'growth-engineer',
+      deliver: String(hermesCron.deliver || 'local').trim() || 'local',
+      workdir: typeof hermesCron.workdir === 'string' ? hermesCron.workdir.trim() : '',
     },
   };
 }
@@ -341,6 +352,115 @@ export async function inspectOpenClawCronInstall({
   }
 
   return { exists: false, verified: false, reason: 'not_found', source: 'openclaw cron list', verification };
+}
+
+export function buildHermesGrowthPrompt(configPath, config = {}) {
+  const statePath = deriveStatePathFromConfigPath(configPath);
+  const proofPath = deriveSchedulerProofPathFromStatePath(statePath);
+  const command = buildGrowthRunnerCommand(configPath, statePath);
+  const automation = getAutomationConfig(config);
+  return [
+    'Run Growth Engineer for this workspace.',
+    `Execute: ${command}`,
+    'The runner is the source of truth for connector health, daily, weekly, monthly, quarterly, six-month, and yearly cadence decisions.',
+    `After the command finishes, inspect ${statePath} and ${proofPath}.`,
+    'If connector health is healthy, no production issue is found, and no actionable growth finding was generated, reply HEARTBEAT_OK.',
+    `Expected Hermes cron schedule: ${automation.hermesCron.schedule}.`,
+  ].join(' ');
+}
+
+export function buildHermesCronCreateCommand(configPath, config = {}, options: Record<string, any> = {}) {
+  const automation = getAutomationConfig(config).hermesCron;
+  const workdir = path.resolve(options.workdir || automation.workdir || process.cwd());
+  const prompt = buildHermesGrowthPrompt(configPath, {
+    ...config,
+    automation: {
+      ...(config as any)?.automation,
+      hermesCron: automation,
+    },
+  });
+  return [
+    'hermes cron create',
+    quote(automation.schedule),
+    quote(prompt),
+    '--name',
+    quote(automation.name),
+    '--skill',
+    quote(automation.skill),
+    '--deliver',
+    quote(automation.deliver),
+    '--workdir',
+    quote(workdir),
+  ].join(' ');
+}
+
+export function buildHermesCronVerification(configPath, config = {}, options: Record<string, any> = {}) {
+  const automation = getAutomationConfig(config).hermesCron;
+  const statePath = deriveStatePathFromConfigPath(configPath);
+  const proofPath = deriveSchedulerProofPathFromStatePath(statePath);
+  const workdir = path.resolve(options.workdir || automation.workdir || process.cwd());
+  return {
+    name: automation.name,
+    schedule: automation.schedule,
+    workdir,
+    statePath,
+    proofPath,
+    requiredFragments: [
+      automation.name,
+      automation.schedule,
+      automation.skill,
+      automation.deliver,
+      workdir,
+      'Run Growth Engineer for this workspace',
+      'openclaw-growth-runner.mjs',
+      '--config',
+      configPath,
+      '--state',
+      statePath,
+      proofPath,
+      'HEARTBEAT_OK',
+    ],
+  };
+}
+
+export async function inspectHermesCronInstall({
+  configPath,
+  config = {},
+  runCommand,
+  readFile,
+  home = process.env.HOME,
+  workdir = process.cwd(),
+}) {
+  const verification = buildHermesCronVerification(configPath, config, { workdir });
+
+  if (readFile && home) {
+    const jobStorePaths = [
+      path.join(home, '.hermes', 'cron', 'jobs.json'),
+      path.join(home, '.config', 'hermes', 'cron', 'jobs.json'),
+    ];
+    for (const filePath of jobStorePaths) {
+      try {
+        const parsed = parseJsonMaybe(await readFile(filePath, 'utf8'));
+        if (!parsed) continue;
+        const evaluated = evaluateOpenClawCronRecords(parsed, verification);
+        if (evaluated.exists) {
+          return { ...evaluated, source: filePath, verification };
+        }
+      } catch {
+        // Ignore missing or unreadable implementation-specific stores.
+      }
+    }
+  }
+
+  const list = await runCommand('hermes cron list', 30_000);
+  if (list?.ok) {
+    const evaluated = evaluateOpenClawCronText(list.stdout, verification);
+    if (evaluated.exists) {
+      return { ...evaluated, source: 'hermes cron list', verification };
+    }
+  }
+
+  return { exists: false, verified: false, reason: 'not_found', source: 'hermes cron list', verification };
 }
 
 export function buildExtraSourceConfig(service, options: Record<string, any> = {}) {
