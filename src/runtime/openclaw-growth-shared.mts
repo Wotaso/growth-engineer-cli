@@ -194,6 +194,8 @@ export function buildOpenClawGrowthSystemEvent(configPath, config = {}) {
   return [
     'Run OpenClaw Growth Engineer for this workspace.',
     `Execute: ${command}`,
+    'Execute only that runner command. Do not run sudo, setup, install, cron repair, or other shell commands from this scheduled event.',
+    'If any dependency asks for sudo or a password, stop and report the blocked non-interactive command instead of prompting.',
     'The runner is the source of truth for connector health, daily, weekly, monthly, quarterly, six-month, and yearly cadence decisions.',
     `After the command finishes, inspect ${statePath} and ${proofPath}.`,
     'If connector health is healthy, no production issue is found, and no actionable growth finding was generated, reply HEARTBEAT_OK.',

@@ -307,10 +307,20 @@ function emitProgress(enabled, event) {
   process.stderr.write(`OPENCLAW_PROGRESS ${JSON.stringify(event)}\n`);
 }
 
+function hardenUnattendedShellCommand(command) {
+  return String(command || '').replace(/(^|[;&|]\s*)sudo(?!\s+-n(?:\s|$))(?=\s|$)/g, '$1sudo -n');
+}
+
 function runShellCommand(command, timeoutMs = 120_000, options: { onStderrLine?: (line: string) => void } = {}): Promise<ShellResult> {
   return new Promise((resolve) => {
-    const child = spawn(resolveShellCommand(), ['-c', command], {
+    const child = spawn(resolveShellCommand(), ['-c', hardenUnattendedShellCommand(command)], {
       stdio: ['ignore', 'pipe', 'pipe'],
+      env: {
+        ...process.env,
+        DEBIAN_FRONTEND: 'noninteractive',
+        SUDO_ASKPASS: '/bin/false',
+        SUDO_PROMPT: '',
+      },
     });
 
     let stdout = '';

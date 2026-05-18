@@ -224,12 +224,22 @@ function resolveShellCommand(): string {
   return 'sh';
 }
 
+function hardenUnattendedShellCommand(command) {
+  return String(command || '').replace(/(^|[;&|]\s*)sudo(?!\s+-n(?:\s|$))(?=\s|$)/g, '$1sudo -n');
+}
+
 function runShell(command, options: { cwd?: string; env?: NodeJS.ProcessEnv; timeoutMs?: number } = {}): Promise<ShellResult> {
   return new Promise((resolve) => {
-    const child = spawn(resolveShellCommand(), ['-c', command], {
+    const child = spawn(resolveShellCommand(), ['-c', hardenUnattendedShellCommand(command)], {
       stdio: ['ignore', 'pipe', 'pipe'],
       cwd: options.cwd,
-      env: options.env ? { ...process.env, ...options.env } : process.env,
+      env: {
+        ...process.env,
+        ...(options.env || {}),
+        DEBIAN_FRONTEND: 'noninteractive',
+        SUDO_ASKPASS: '/bin/false',
+        SUDO_PROMPT: '',
+      },
     });
 
     let stdout = '';

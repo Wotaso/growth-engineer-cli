@@ -427,11 +427,26 @@ function resolveShellCommand(): string {
   return 'sh';
 }
 
+function hardenUnattendedShellCommand(command) {
+  return String(command || '').replace(/(^|[;&|]\s*)sudo(?!\s+-n(?:\s|$))(?=\s|$)/g, '$1sudo -n');
+}
+
+function isSudoPasswordPrompt(stderr) {
+  return /sudo: (?:a password is required|a terminal is required to read the password|no tty present)/i.test(String(stderr || ''));
+}
+
 function runShellCommand(command, timeoutMs = 120_000, options: { cwd?: string; input?: string } = {}): Promise<ShellResult> {
   return new Promise((resolve) => {
-    const child = spawn(resolveShellCommand(), ['-c', command], {
+    const hardenedCommand = hardenUnattendedShellCommand(command);
+    const child = spawn(resolveShellCommand(), ['-c', hardenedCommand], {
       stdio: options.input === undefined ? ['ignore', 'pipe', 'pipe'] : ['pipe', 'pipe', 'pipe'],
       cwd: options.cwd,
+      env: {
+        ...process.env,
+        DEBIAN_FRONTEND: 'noninteractive',
+        SUDO_ASKPASS: '/bin/false',
+        SUDO_PROMPT: '',
+      },
     });
     let stdout = '';
     let stderr = '';
@@ -448,6 +463,17 @@ function runShellCommand(command, timeoutMs = 120_000, options: { cwd?: string; 
     });
     child.stderr.on('data', (chunk) => {
       stderr += String(chunk);
+      if (!settled && isSudoPasswordPrompt(stderr)) {
+        settled = true;
+        clearTimeout(timer);
+        child.kill('SIGTERM');
+        resolve({
+          ok: false,
+          code: null,
+          stdout,
+          stderr: `${stderr.trim()}\nBlocked non-interactive sudo prompt. Configure passwordless sudo for this exact command or remove sudo from the Growth Engineer connector command.`,
+        });
+      }
     });
     if (options.input !== undefined) {
       child.stdin.end(options.input);
