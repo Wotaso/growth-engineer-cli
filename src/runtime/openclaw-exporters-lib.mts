@@ -1355,6 +1355,199 @@ export function buildSentrySummary(input) {
   };
 }
 
+function normalizeCoolifyName(value, fallback) {
+  const text = String(value || '').trim();
+  return text || fallback;
+}
+
+function normalizeCoolifyDomains(resource) {
+  const raw = resource?.domains ?? resource?.fqdn ?? resource?.domain ?? resource?.url ?? '';
+  if (Array.isArray(raw)) return raw.map((entry) => String(entry).trim()).filter(Boolean);
+  return String(raw || '')
+    .split(',')
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+}
+
+function normalizeCoolifyStatus(value) {
+  return String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, '_');
+}
+
+function isCoolifyDeploymentFailed(deployment) {
+  const status = normalizeCoolifyStatus(deployment?.status || deployment?.state);
+  return Boolean(status && /(failed|error|cancelled|canceled|exited|unhealthy)/i.test(status));
+}
+
+function isCoolifyDeploymentRecent(deployment, sinceMs) {
+  const candidates = [
+    deployment?.created_at,
+    deployment?.createdAt,
+    deployment?.updated_at,
+    deployment?.updatedAt,
+    deployment?.finished_at,
+    deployment?.finishedAt,
+  ];
+  const timestamps = candidates
+    .map((value) => Date.parse(String(value || '')))
+    .filter((value) => Number.isFinite(value));
+  if (timestamps.length === 0) return true;
+  return Math.max(...timestamps) >= sinceMs;
+}
+
+function isCoolifyResourceUnhealthy(resource) {
+  const status = normalizeCoolifyStatus(resource?.status || resource?.state || resource?.health);
+  if (!status) return false;
+  return /(unhealthy|failed|error|exited|stopped|dead|degraded|missing)/i.test(status);
+}
+
+function coolifyResourceLabel(resource, fallback) {
+  return normalizeCoolifyName(
+    resource?.name || resource?.application_name || resource?.service_name || resource?.uuid || resource?.id,
+    fallback,
+  );
+}
+
+export function buildCoolifySummary(input) {
+  const applications = Array.isArray(input?.applications) ? input.applications : [];
+  const deployments = Array.isArray(input?.deployments) ? input.deployments : [];
+  const resources = Array.isArray(input?.resources) ? input.resources : [];
+  const servers = Array.isArray(input?.servers) ? input.servers : [];
+  const warnings = Array.isArray(input?.warnings) ? input.warnings.map((entry) => String(entry)).filter(Boolean) : [];
+  const baseUrl = String(input?.baseUrl || process.env.COOLIFY_BASE_URL || '').replace(/\/$/, '');
+  const last = String(input?.last || input?.window || '24h');
+  const maxSignals = Math.max(1, Number(input?.maxSignals) || 8);
+  const durationValue = Number(last.slice(0, -1));
+  const durationMs = Number.isFinite(durationValue) && last.endsWith('d')
+    ? durationValue * 24 * 60 * 60 * 1000
+    : Number.isFinite(durationValue) && last.endsWith('h')
+      ? durationValue * 60 * 60 * 1000
+      : Number.isFinite(durationValue) && last.endsWith('m')
+        ? durationValue * 60 * 1000
+        : 24 * 60 * 60 * 1000;
+  const sinceMs = Date.now() - durationMs;
+
+  const signals = [];
+  const failedDeployments = deployments
+    .filter((deployment) => isCoolifyDeploymentFailed(deployment) && isCoolifyDeploymentRecent(deployment, sinceMs))
+    .slice(0, maxSignals);
+  if (failedDeployments.length > 0) {
+    signals.push({
+      id: 'coolify_failed_deployments',
+      title: 'Coolify has recent failed deployments',
+      area: 'crash',
+      priority: failedDeployments.length >= 3 ? 'high' : 'medium',
+      metric: 'coolify_failed_deployments',
+      current_value: failedDeployments.length,
+      evidence: failedDeployments.slice(0, 5).map((deployment) => {
+        const app = coolifyResourceLabel(deployment, 'unknown resource');
+        const status = deployment?.status || deployment?.state || 'unknown status';
+        const when = deployment?.created_at || deployment?.createdAt || deployment?.finished_at || deployment?.finishedAt || '';
+        return `${app}: ${status}${when ? ` at ${when}` : ''}`;
+      }),
+      suggested_actions: [
+        'Open the failed Coolify deployment and inspect build/runtime logs before pushing more traffic to the app',
+        'Correlate the failed deploy with Sentry issues, release changes, and AnalyticsCLI conversion or activation drops',
+        'Fix the deployment blocker or roll back the affected service before running growth experiments',
+      ],
+      keywords: ['coolify', 'deployment', 'hosting', 'production'],
+      confidence: 'high',
+    });
+  }
+
+  const unhealthyResources = [...applications, ...resources]
+    .filter((resource) => isCoolifyResourceUnhealthy(resource))
+    .slice(0, maxSignals);
+  if (unhealthyResources.length > 0) {
+    signals.push({
+      id: 'coolify_unhealthy_resources',
+      title: 'Coolify reports unhealthy or stopped resources',
+      area: 'crash',
+      priority: 'high',
+      metric: 'coolify_unhealthy_resources',
+      current_value: unhealthyResources.length,
+      evidence: unhealthyResources.slice(0, 8).map((resource) => {
+        const name = coolifyResourceLabel(resource, 'unknown resource');
+        const status = resource?.status || resource?.state || resource?.health || 'unknown status';
+        const domains = normalizeCoolifyDomains(resource);
+        return `${name}: ${status}${domains.length ? ` (${domains.join(', ')})` : ''}`;
+      }),
+      suggested_actions: [
+        'Restore or restart the unhealthy Coolify resource and verify its public domain before prioritizing product-growth work',
+        'Check whether Sentry error volume and AnalyticsCLI active users changed after the resource became unhealthy',
+        'Add or tighten health checks for the affected service so future incidents are caught earlier',
+      ],
+      keywords: ['coolify', 'health', 'availability', 'hosting'],
+      confidence: 'high',
+    });
+  }
+
+  const publicAppsWithoutHealthChecks = applications
+    .filter((app) => normalizeCoolifyDomains(app).length > 0 && app?.health_check_enabled === false)
+    .slice(0, maxSignals);
+  if (publicAppsWithoutHealthChecks.length > 0) {
+    signals.push({
+      id: 'coolify_public_apps_without_health_checks',
+      title: 'Public Coolify applications are missing health checks',
+      area: 'crash',
+      priority: 'medium',
+      metric: 'coolify_missing_health_checks',
+      current_value: publicAppsWithoutHealthChecks.length,
+      evidence: publicAppsWithoutHealthChecks.slice(0, 8).map((app) => {
+        const name = coolifyResourceLabel(app, 'unknown application');
+        return `${name}: ${normalizeCoolifyDomains(app).join(', ')}`;
+      }),
+      suggested_actions: [
+        'Enable Coolify health checks for public production applications',
+        'Use the health endpoint that best reflects the real app dependency path, not only process liveness',
+        'Pair Coolify health-check alerts with Sentry and AnalyticsCLI anomaly checks in the daily guardrail',
+      ],
+      keywords: ['coolify', 'health_check', 'production', 'monitoring'],
+      confidence: 'medium',
+    });
+  }
+
+  if (warnings.length > 0) {
+    signals.push({
+      id: 'coolify_api_partial_read',
+      title: 'Coolify API summary is partial',
+      area: 'general',
+      priority: 'low',
+      metric: 'coolify_api_warnings',
+      current_value: warnings.length,
+      evidence: warnings.slice(0, 8),
+      suggested_actions: [
+        'Verify the Coolify API token has read-only access to the team that owns the production resources',
+        'Keep the token read-only; only expand permissions if a specific API endpoint requires it',
+      ],
+      keywords: ['coolify', 'api', 'token', 'permissions'],
+      confidence: 'medium',
+    });
+  }
+
+  return {
+    project: baseUrl ? `coolify:${baseUrl}` : 'coolify',
+    window: normalizeWindow(last),
+    applications,
+    deployments,
+    resources,
+    servers,
+    signals: signals.slice(0, maxSignals),
+    meta: {
+      generatedAt: new Date().toISOString(),
+      source: 'coolify',
+      baseUrl: baseUrl || null,
+      applicationsReturned: applications.length,
+      deploymentsReturned: deployments.length,
+      resourcesReturned: resources.length,
+      serversReturned: servers.length,
+      warnings,
+    },
+  };
+}
+
 export async function writeJsonOutput(outPath, payload) {
   const serialized = `${JSON.stringify(payload, null, 2)}\n`;
   if (outPath) {

@@ -19,6 +19,7 @@ const AREA_KEYWORDS = {
   conversion: ['checkout', 'purchase', 'billing', 'trial', 'subscribe', 'price'],
   crash: ['error', 'exception', 'crash', 'stack', 'sentry', 'fatal'],
   marketing: ['store', 'metadata', 'keyword', 'seo', 'landing', 'copy', 'conversion_copy'],
+  infrastructure: ['coolify', 'deployment', 'deploy', 'hosting', 'server', 'health check', 'availability'],
 };
 
 const DEFAULT_PROPOSALS = {
@@ -46,6 +47,11 @@ const DEFAULT_PROPOSALS = {
     'Reproduce the issue with a deterministic test case and lock a failing assertion.',
     'Harden null/undefined boundaries around failing callsites.',
     'Add telemetry breadcrumbs to isolate the exact pre-crash state.',
+  ],
+  infrastructure: [
+    'Fix the deployment or hosting blocker before increasing traffic to the affected surface.',
+    'Add or tighten production health checks so the next outage becomes a connector-health alert.',
+    'Correlate deployment timing with Sentry issues and AnalyticsCLI funnel movement before assigning product causality.',
   ],
   marketing: [
     'Update App Store/landing copy to align value proposition with strongest usage signal.',

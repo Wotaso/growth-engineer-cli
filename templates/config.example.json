@@ -1,5 +1,5 @@
 {
-  "version": 7,
+  "version": 2,
   "generatedAt": "2026-03-21T00:00:00.000Z",
   "project": {
     "githubRepo": "owner/repo",
@@ -17,13 +17,40 @@
     },
     "revenuecat": {
       "enabled": false,
-      "mode": "file",
-      "path": "data/openclaw-growth-engineer/revenuecat_summary.example.json"
+      "mode": "command",
+      "command": "node scripts/export-revenuecat-summary.mjs"
     },
     "sentry": {
       "enabled": false,
       "mode": "command",
-      "command": "node scripts/export-sentry-summary.mjs"
+      "command": "node scripts/export-sentry-summary.mjs --config data/openclaw-growth-engineer/config.json",
+      "accounts": [
+        {
+          "id": "sentry_cloud",
+          "label": "Sentry Cloud",
+          "baseUrl": "https://sentry.io",
+          "tokenEnv": "SENTRY_AUTH_TOKEN",
+          "org": "owner-org",
+          "projects": ["ios-app"],
+          "environment": "production"
+        },
+        {
+          "id": "glitchtip_selfhosted",
+          "label": "GlitchTip self-hosted",
+          "baseUrl": "https://glitchtip.example.com",
+          "tokenEnv": "GLITCHTIP_AUTH_TOKEN",
+          "org": "owner-org",
+          "projects": ["backend-api", "web-app"],
+          "environment": "production"
+        }
+      ]
+    },
+    "coolify": {
+      "enabled": false,
+      "mode": "command",
+      "command": "npx -y @analyticscli/growth-engineer@preview exporters coolify-summary --config data/openclaw-growth-engineer/config.json",
+      "baseUrl": "https://coolify.example.com",
+      "tokenEnv": "COOLIFY_API_TOKEN"
     },
     "feedback": {
       "enabled": true,
@@ -34,21 +61,12 @@
     },
     "extra": [
       {
-        "key": "glitchtip",
-        "label": "glitchtip",
-        "service": "glitchtip",
-        "enabled": false,
-        "mode": "file",
-        "path": "data/openclaw-growth-engineer/glitchtip_summary.json",
-        "secretEnv": "GLITCHTIP_API_TOKEN"
-      },
-      {
         "key": "asc_cli",
         "label": "asc-cli",
         "service": "asc-cli",
         "enabled": false,
         "mode": "command",
-        "command": "node scripts/export-asc-summary.mjs",
+        "command": "node scripts/export-asc-summary.mjs --max-signals 6",
         "secretEnv": "ASC_KEY_ID"
       }
     ]
@@ -64,9 +82,9 @@
         "title": "Daily Sentry and production guardrail",
         "intervalDays": 1,
         "criticalOnly": true,
-        "focusAreas": ["sentry_errors", "crash", "onboarding", "conversion", "paywall", "purchase"],
-        "sourcePriorities": ["sentry", "glitchtip", "analytics", "revenuecat", "asc_cli", "feedback", "github"],
-        "objective": "Analyze every configured project for critical production blockers: Sentry/GlitchTip errors, crashes, onboarding or purchase drop-offs, zero-conversion days, missing buyers, very low users, and other silent business anomalies.",
+        "focusAreas": ["sentry_errors", "crash", "deployment", "availability", "onboarding", "conversion", "paywall", "purchase"],
+        "sourcePriorities": ["sentry", "glitchtip", "coolify", "analytics", "revenuecat", "asc_cli", "feedback", "github"],
+        "objective": "Analyze every configured project for critical production blockers: Sentry/GlitchTip errors, Coolify failed deploys or unhealthy resources, crashes, onboarding or purchase drop-offs, zero-conversion days, missing buyers, very low users, and other silent business anomalies.",
         "instructions": "Compare against recent baselines across connected sources and code changes. If the finding is critical, produce the exact fix or next debugging step and prefer a GitHub issue or draft PR when GitHub write access is configured; otherwise hand off via OpenClaw chat. Avoid generic growth ideas."
       },
       {
@@ -75,7 +93,7 @@
         "intervalDays": 7,
         "criticalOnly": false,
         "focusAreas": ["conversion", "paywall", "onboarding", "marketing", "retention", "stability"],
-        "sourcePriorities": ["analytics", "revenuecat", "asc_cli", "feedback", "sentry", "github"],
+        "sourcePriorities": ["analytics", "revenuecat", "asc_cli", "feedback", "sentry", "coolify", "github"],
         "objective": "Create an executive summary across all configured projects, connectors, recent releases, code changes, revenue, activation, retention, reviews, and production stability.",
         "instructions": "Pick one to three high-confidence improvements with evidence, expected KPI movement, likely code/store surfaces, owner-ready next steps, and a verification plan. Create GitHub issues or draft PR proposals only when the evidence is specific enough."
       },
@@ -85,7 +103,7 @@
         "intervalDays": 30,
         "criticalOnly": false,
         "focusAreas": ["conversion", "paywall", "retention", "marketing", "onboarding", "codebase"],
-        "sourcePriorities": ["analytics", "revenuecat", "asc_cli", "feedback", "sentry", "github"],
+        "sourcePriorities": ["analytics", "revenuecat", "asc_cli", "feedback", "sentry", "coolify", "github"],
         "objective": "Compare all configured projects month-over-month: MRR, trial conversion, churn, acquisition quality, store conversion, retention, review themes, feature usage, crash totals, and codebase changes.",
         "instructions": "Decide what should be built, changed, deleted, or instrumented next. Tie conclusions to connector data plus codebase evidence and explain why each recommendation should move revenue, activation, retention, stability, or acquisition quality."
       },
@@ -121,37 +139,14 @@
       }
     ]
   },
-  "strategy": {
-    "proposalMode": "balanced"
-  },
-  "deliveries": {
-    "openclawChat": {
-      "enabled": true,
-      "markdownPath": ".openclaw/chat/latest.md",
-      "jsonPath": ".openclaw/chat/latest.json"
-    },
-    "github": {
-      "enabled": false,
-      "mode": "issue",
-      "autoCreate": true,
-      "draftPullRequests": true,
-      "proposalBranchPrefix": "openclaw/proposals"
-    },
-    "slack": {
-      "enabled": false,
-      "webhookEnv": "SLACK_WEBHOOK_URL"
-    },
-    "webhook": {
-      "enabled": false,
-      "urlEnv": "OPENCLAW_WEBHOOK_URL",
-      "method": "POST",
-      "headers": {}
-    },
-    "command": {
-      "enabled": false,
-      "label": "command",
-      "command": ""
-    }
+  "actions": {
+    "mode": "issue",
+    "autoCreateIssues": true,
+    "autoCreatePullRequests": false,
+    "autoCreateWhenGitHubWriteAccess": true,
+    "disableAutoCreateGitHubArtifacts": false,
+    "draftPullRequests": true,
+    "proposalBranchPrefix": "openclaw/proposals"
   },
   "charting": {
     "enabled": false,
@@ -187,7 +182,20 @@
       "mode": "main",
       "schedule": "*/30 * * * *",
       "timezone": "UTC",
-      "name": "OpenClaw Growth Engineer scheduler"
+      "name": "OpenClaw Growth Engineer scheduler",
+      "delivery": {
+        "enabled": true,
+        "mode": "announce",
+        "channel": "last",
+        "to": ""
+      }
+    },
+    "hermesCron": {
+      "enabled": true,
+      "schedule": "*/30 * * * *",
+      "name": "Hermes Growth Engineer scheduler",
+      "skill": "growth-engineer",
+      "deliver": "local"
     }
   },
   "security": {
@@ -206,6 +214,8 @@
     "revenuecatTokenEnv": "REVENUECAT_API_KEY",
     "revenuecatTokenRef": { "source": "env", "provider": "default", "id": "REVENUECAT_API_KEY" },
     "sentryTokenEnv": "SENTRY_AUTH_TOKEN",
-    "sentryTokenRef": { "source": "env", "provider": "default", "id": "SENTRY_AUTH_TOKEN" }
+    "sentryTokenRef": { "source": "env", "provider": "default", "id": "SENTRY_AUTH_TOKEN" },
+    "coolifyTokenEnv": "COOLIFY_API_TOKEN",
+    "coolifyTokenRef": { "source": "env", "provider": "default", "id": "COOLIFY_API_TOKEN" }
   }
 }

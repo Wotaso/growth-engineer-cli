@@ -60,12 +60,13 @@ const moduleDir = dirname(fileURLToPath(import.meta.url));
 const packageRoot = resolve(moduleDir, '..');
 const localAnalyticsCliDir = resolve(packageRoot, '../cli');
 const analyticsCliPackageSpec = process.env.ANALYTICSCLI_CLI_PACKAGE || '@analyticscli/cli@preview';
+const growthEngineerPackageSpec = process.env.OPENCLAW_GROWTH_ENGINEER_PACKAGE || '@analyticscli/growth-engineer@preview';
 const analyticsCliNpmPrefix =
   process.env.ANALYTICSCLI_NPM_PREFIX ||
   (process.env.HOME ? join(process.env.HOME, '.local') : resolve(process.cwd(), '.analyticscli-npm'));
 const program = new Command();
 
-type ConnectorKey = 'github' | 'asc' | 'revenuecat';
+type ConnectorKey = 'github' | 'asc' | 'revenuecat' | 'coolify';
 
 type ConnectorInstallResult = {
   connector: ConnectorKey;
@@ -79,6 +80,9 @@ const shellQuote = (value: string): string => {
   }
   return `'${value.replace(/'/g, `'\\''`)}'`;
 };
+
+const growthEngineerNpxCommand = (args: string): string =>
+  `npx -y ${shellQuote(growthEngineerPackageSpec)} ${args}`;
 
 const truncate = (value: string, max = 240): string =>
   value.length <= max ? value : `${value.slice(0, max)}...`;
@@ -385,7 +389,7 @@ const detectGitHubRepo = (cwd: string): string | null => {
   return parseGitHubRepoFromRemote(result.stdout.trim());
 };
 
-const resolveDefaultSourceCommand = (repoRoot: string, command: 'analytics' | 'asc' | 'feedback'): string => {
+const resolveDefaultSourceCommand = (repoRoot: string, command: 'analytics' | 'asc' | 'feedback' | 'coolify'): string => {
   if (command === 'analytics') {
     const repoScript = resolve(repoRoot, 'scripts', 'export-analytics-summary.mjs');
     return fileExists(repoScript)
@@ -395,6 +399,10 @@ const resolveDefaultSourceCommand = (repoRoot: string, command: 'analytics' | 'a
 
   if (command === 'feedback') {
     return 'analyticscli feedback summary --format json';
+  }
+
+  if (command === 'coolify') {
+    return growthEngineerNpxCommand('exporters coolify-summary');
   }
 
   const repoScript = resolve(repoRoot, 'scripts', 'export-asc-summary.mjs');
@@ -456,6 +464,12 @@ const createInitialConfig = async (configPath: string, repoRoot: string, force: 
       sentry: {
         ...template.sources.sentry,
         enabled: false,
+      },
+      coolify: {
+        ...template.sources.coolify,
+        enabled: false,
+        mode: 'command',
+        command: resolveDefaultSourceCommand(repoRoot, 'coolify'),
       },
       feedback: {
         ...template.sources.feedback,
@@ -600,6 +614,10 @@ const normalizeConnectorKey = (value: string): ConnectorKey | 'all' | null => {
     return 'revenuecat';
   }
 
+  if (['coolify', 'coolify-api', 'deployment', 'deployments', 'hosting', 'infra', 'infrastructure'].includes(normalized)) {
+    return 'coolify';
+  }
+
   return null;
 };
 
@@ -613,7 +631,7 @@ const parseConnectorList = (value?: string): ConnectorKey[] => {
     const connector = normalizeConnectorKey(entry);
     if (!connector) {
       throw Object.assign(
-        new Error(`Unknown connector "${entry.trim()}". Use github, asc, revenuecat, or all.`),
+        new Error(`Unknown connector "${entry.trim()}". Use github, asc, revenuecat, coolify, or all.`),
         { exitCode: 2 },
       );
     }
@@ -622,6 +640,7 @@ const parseConnectorList = (value?: string): ConnectorKey[] => {
       connectors.add('github');
       connectors.add('asc');
       connectors.add('revenuecat');
+      connectors.add('coolify');
     } else {
       connectors.add(connector);
     }
@@ -838,6 +857,16 @@ const enableConnectorConfig = async (configPath: string, connectors: ConnectorKe
             enabled: true,
           }
         : config.sources.revenuecat,
+      coolify: connectors.includes('coolify')
+        ? {
+            ...config.sources.coolify,
+            enabled: true,
+            mode: 'command',
+            command:
+              config.sources.coolify?.command ||
+              `${resolveDefaultSourceCommand(repoRoot, 'coolify')} --config ${shellQuote(configPath)}`,
+          }
+        : config.sources.coolify,
       extra: config.sources.extra.map((source) => {
         if (connectors.includes('asc') && source.service === 'asc-cli') {
           return {
@@ -868,6 +897,14 @@ const installConnectorHelpers = async (
     }
     if (connector === 'asc') {
       return installAscConnector();
+    }
+    if (connector === 'coolify') {
+      return {
+        connector: 'coolify',
+        ok: true,
+        detail:
+          'Coolify is configured through the npx wizard connector flow; create a read-only API token in Coolify Keys & Tokens / API tokens, then run `npx -y @analyticscli/growth-engineer@preview wizard --connectors coolify` to store COOLIFY_BASE_URL and COOLIFY_API_TOKEN locally',
+      };
     }
     return installRevenueCatConnector();
   });
@@ -1245,7 +1282,7 @@ program
   .option('--skip-shared-skills', 'Skip shared skill installation', false)
   .option(
     '--connectors <list>',
-    'Install/enable connector helper tooling for selected connectors (github,asc,revenuecat,all)',
+    'Install/enable connector helper tooling for selected connectors (github,asc,revenuecat,coolify,all)',
   )
   .action(
     async (options: {
@@ -1407,6 +1444,22 @@ exportersCommand
   .allowUnknownOption(true)
   .action(() => {
     const result = runRuntime('export-asc-summary', forwardedArgsAfter('asc-summary'), {
+      cwd: process.cwd(),
+      timeoutMs: 20 * 60_000,
+    });
+    process.stdout.write(result.stdout);
+    process.stderr.write(result.stderr);
+    if (!result.ok) {
+      process.exitCode = 1;
+    }
+  });
+
+exportersCommand
+  .command('coolify-summary')
+  .description('Export the default Coolify deployment summary JSON')
+  .allowUnknownOption(true)
+  .action(() => {
+    const result = runRuntime('export-coolify-summary', forwardedArgsAfter('coolify-summary'), {
       cwd: process.cwd(),
       timeoutMs: 20 * 60_000,
     });

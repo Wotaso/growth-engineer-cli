@@ -51,6 +51,7 @@ function getConfiguredSecretRefs(config): Array<{ envName: string; ref: SecretRe
     ['analyticsTokenEnv', 'analyticsTokenRef', 'ANALYTICSCLI_ACCESS_TOKEN'],
     ['revenuecatTokenEnv', 'revenuecatTokenRef', 'REVENUECAT_API_KEY'],
     ['sentryTokenEnv', 'sentryTokenRef', 'SENTRY_AUTH_TOKEN'],
+    ['coolifyTokenEnv', 'coolifyTokenRef', 'COOLIFY_API_TOKEN'],
   ];
 
   return pairs

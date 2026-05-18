@@ -142,6 +142,8 @@ const secretsSchema = z
     revenuecatTokenRef: secretRefSchema.optional(),
     sentryTokenEnv: z.string().default('SENTRY_AUTH_TOKEN'),
     sentryTokenRef: secretRefSchema.optional(),
+    coolifyTokenEnv: z.string().default('COOLIFY_API_TOKEN'),
+    coolifyTokenRef: secretRefSchema.optional(),
   })
   .default({});
 
@@ -192,6 +194,7 @@ const templateConfigSchema = z.object({
       analytics: sourceSchema.default({ enabled: true, mode: 'command' }),
       revenuecat: sourceSchema.default({ enabled: false, mode: 'file' }),
       sentry: sourceSchema.default({ enabled: false, mode: 'file' }),
+      coolify: sourceSchema.default({ enabled: false, mode: 'command' }),
       feedback: sourceSchema.default({
         enabled: true,
         mode: 'command',
@@ -242,6 +245,7 @@ export type LegacyGrowthConfig = {
     analytics: z.infer<typeof sourceSchema>;
     revenuecat: z.infer<typeof sourceSchema>;
     sentry: z.infer<typeof sourceSchema>;
+    coolify: z.infer<typeof sourceSchema>;
     feedback: z.infer<typeof sourceSchema>;
     extra: Array<z.infer<typeof sourceSchema>>;
   };
@@ -318,6 +322,7 @@ export const toLegacyGrowthConfig = (
       analytics: absolutizeSource(baseDir, config.sources.analytics),
       revenuecat: absolutizeSource(baseDir, config.sources.revenuecat),
       sentry: absolutizeSource(baseDir, config.sources.sentry),
+      coolify: absolutizeSource(baseDir, config.sources.coolify),
       feedback: absolutizeSource(baseDir, config.sources.feedback),
       extra: config.sources.extra.map((source) => absolutizeSource(baseDir, source)),
     },

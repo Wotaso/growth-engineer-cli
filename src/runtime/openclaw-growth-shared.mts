@@ -1,6 +1,6 @@
 import path from 'node:path';
 
-const BUILTIN_SOURCE_NAMES = ['analytics', 'revenuecat', 'sentry', 'feedback'];
+const BUILTIN_SOURCE_NAMES = ['analytics', 'revenuecat', 'sentry', 'coolify', 'feedback'];
 const DEFAULT_CONFIG_PATH = 'data/openclaw-growth-engineer/config.json';
 
 function quote(value) {
@@ -23,6 +23,7 @@ const SERVICE_KIND_ALIASES = {
   ],
   revenue: ['revenuecat', 'stripe', 'purchases', 'billing', 'adapty', 'superwall'],
   crash: ['sentry', 'glitchtip', 'crashlytics', 'bugsnag', 'datadog', 'rollbar'],
+  infrastructure: ['coolify', 'deployment', 'deployments', 'hosting', 'infrastructure', 'infra'],
   feedback: [
     'feedback',
     'support',
@@ -88,6 +89,9 @@ export function getDefaultSourceHint(service) {
   if (kind === 'crash') {
     return '- Crash/error provider summary with top regressions, affected users, and issue evidence.\n- `issues[]` or shared `signals[]` payloads are both accepted.';
   }
+  if (kind === 'infrastructure') {
+    return '- Hosting/deployment summary with failed deploys, unhealthy resources, and health-check gaps.\n- Command mode should output JSON in the shared signals[] shape.';
+  }
   if (kind === 'feedback') {
     return '- Aggregate app reviews, support tickets, or in-app feedback into recurring themes.\n- `items[]` or shared `signals[]` payloads are both accepted.';
   }
@@ -108,6 +112,9 @@ export function getDefaultSourceCommand(service) {
   if (normalized === 'sentry') {
     return 'node scripts/export-sentry-summary.mjs';
   }
+  if (normalized === 'coolify') {
+    return 'node scripts/export-coolify-summary.mjs';
+  }
   if (normalized === 'feedback') {
     return 'analyticscli feedback summary --format json';
   }
@@ -126,6 +133,9 @@ export function getAutomationConfig(config) {
   const automation = config?.automation && typeof config.automation === 'object' ? config.automation : {};
   const openclawCron =
     automation.openclawCron && typeof automation.openclawCron === 'object' ? automation.openclawCron : {};
+  const openclawCronDelivery =
+    openclawCron.delivery && typeof openclawCron.delivery === 'object' ? openclawCron.delivery : {};
+  const openclawCronDeliveryMode = String(openclawCronDelivery.mode || 'announce').trim() || 'announce';
   const hermesCron =
     automation.hermesCron && typeof automation.hermesCron === 'object' ? automation.hermesCron : {};
   return {
@@ -137,6 +147,12 @@ export function getAutomationConfig(config) {
       timezone: String(openclawCron.timezone || process.env.TZ || 'UTC').trim() || 'UTC',
       name: String(openclawCron.name || 'OpenClaw Growth Engineer scheduler').trim() ||
         'OpenClaw Growth Engineer scheduler',
+      delivery: {
+        enabled: openclawCronDelivery.enabled !== false && openclawCronDeliveryMode !== 'none',
+        mode: openclawCronDeliveryMode,
+        channel: String(openclawCronDelivery.channel || 'last').trim() || 'last',
+        to: String(openclawCronDelivery.to || '').trim(),
+      },
     },
     hermesCron: {
       enabled: hermesCron.enabled !== false,
@@ -188,7 +204,7 @@ export function buildOpenClawGrowthSystemEvent(configPath, config = {}) {
 export function buildOpenClawCronAddCommand(configPath, config = {}) {
   const automation = getAutomationConfig(config).openclawCron;
   const eventText = buildOpenClawGrowthSystemEvent(configPath, config);
-  return [
+  const command = [
     'openclaw cron add',
     '--name',
     quote(automation.name),
@@ -200,8 +216,19 @@ export function buildOpenClawCronAddCommand(configPath, config = {}) {
     automation.mode === 'isolated' ? 'isolated' : 'main',
     automation.mode === 'isolated' ? '--message' : '--system-event',
     quote(eventText),
-    automation.mode === 'isolated' ? '--announce' : '--wake now',
-  ].join(' ');
+  ];
+  if (automation.delivery.enabled) {
+    command.push('--announce', '--channel', quote(automation.delivery.channel));
+    if (automation.delivery.to) {
+      command.push('--to', quote(automation.delivery.to));
+    }
+  } else {
+    command.push('--no-deliver');
+  }
+  if (automation.mode !== 'isolated') {
+    command.push('--wake now');
+  }
+  return command.join(' ');
 }
 
 function normalizeCronComparable(value) {
@@ -247,6 +274,7 @@ export function buildOpenClawCronVerification(configPath, config = {}) {
     name: automation.name,
     schedule: automation.schedule,
     timezone: automation.timezone,
+    delivery: automation.delivery,
     statePath,
     proofPath,
     requiredFragments: [
@@ -265,10 +293,48 @@ export function buildOpenClawCronVerification(configPath, config = {}) {
   };
 }
 
+function hasExpectedOpenClawCronDelivery(job, verification) {
+  const expected = verification?.delivery || {};
+  const delivery = job && typeof job === 'object' && job.delivery && typeof job.delivery === 'object'
+    ? job.delivery
+    : null;
+
+  if (!expected.enabled) {
+    if (!delivery) return true;
+    const mode = String(delivery.mode || '').trim().toLowerCase();
+    return delivery.enabled === false || mode === 'none' || mode === 'disabled';
+  }
+
+  if (delivery) {
+    const mode = String(delivery.mode || '').trim().toLowerCase();
+    if (delivery.enabled === false || mode === 'none' || mode === 'disabled') return false;
+    if (mode && mode !== 'announce') return false;
+
+    const expectedChannel = String(expected.channel || '').trim();
+    const actualChannel = String(delivery.channel || '').trim();
+    if (expectedChannel && expectedChannel !== 'last' && actualChannel !== expectedChannel) return false;
+
+    const expectedTo = String(expected.to || '').trim();
+    if (expectedTo && String(delivery.to || '').trim() !== expectedTo) return false;
+
+    return true;
+  }
+
+  const blob = normalizeCronComparable(JSON.stringify(job || {}));
+  const required = ['announce'];
+  const expectedChannel = String(expected.channel || '').trim();
+  if (expectedChannel && expectedChannel !== 'last') required.push(expectedChannel);
+  if (expected.to) required.push(String(expected.to));
+  return required.every((fragment) => blob.includes(normalizeCronComparable(fragment)));
+}
+
 export function evaluateOpenClawCronRecords(records, verification) {
-  const jobs = collectObjects(records).filter((job) => {
+  const objects = collectObjects(records);
+  const directJobs = objects.filter((job) => {
     const directName = typeof job.name === 'string' ? job.name : typeof job.title === 'string' ? job.title : '';
-    if (directName === verification.name) return true;
+    return directName === verification.name;
+  });
+  const jobs = directJobs.length > 0 ? directJobs : objects.filter((job) => {
     return normalizeCronComparable(JSON.stringify(job)).includes(normalizeCronComparable(verification.name));
   });
 
@@ -276,17 +342,21 @@ export function evaluateOpenClawCronRecords(records, verification) {
     return { exists: false, verified: false, reason: 'not_found', jobs: [] };
   }
 
+  let deliveryMismatch = false;
   for (const job of jobs) {
     const blob = normalizeCronComparable(JSON.stringify(job));
     const missing = verification.requiredFragments.filter(
       (fragment) => !blob.includes(normalizeCronComparable(fragment)),
     );
     if (missing.length === 0) {
-      return { exists: true, verified: true, reason: 'verified', jobs };
+      if (hasExpectedOpenClawCronDelivery(job, verification)) {
+        return { exists: true, verified: true, reason: 'verified', jobs };
+      }
+      deliveryMismatch = true;
     }
   }
 
-  return { exists: true, verified: false, reason: 'missing_required_fragments', jobs };
+  return { exists: true, verified: false, reason: deliveryMismatch ? 'delivery_mismatch' : 'missing_required_fragments', jobs };
 }
 
 export function evaluateOpenClawCronText(text, verification) {
