@@ -13,6 +13,7 @@ import {
   getAllSourceEntries,
   getGitHubArtifactModes,
   getGitHubRequirementText,
+  repairOpenClawCronDeliveryStore,
   shouldAutoCreateGitHubArtifact,
 } from './openclaw-growth-shared.mjs';
 import { applyOpenClawSecretRefs, loadOpenClawGrowthSecrets } from './openclaw-growth-env.mjs';
@@ -1576,6 +1577,20 @@ async function runOnce(configPath, statePath) {
     argv: process.argv.slice(2),
   });
   const config = await readJson(configPath);
+  const cronDeliveryRepair = await repairOpenClawCronDeliveryStore({
+    configPath,
+    config,
+    readFile: fs.readFile,
+    writeFile: fs.writeFile,
+  });
+  if (cronDeliveryRepair.repaired) {
+    await appendSchedulerProof('openclaw_cron_delivery_repaired', {
+      configPath,
+      statePath,
+      path: cronDeliveryRepair.path,
+      repairedCount: cronDeliveryRepair.repairedCount,
+    });
+  }
   await applyOpenClawSecretRefs(config);
   const inferredGitHubRepo = await inferGitHubRepo(config);
   if (inferredGitHubRepo) {
