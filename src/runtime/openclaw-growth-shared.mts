@@ -424,6 +424,74 @@ export async function inspectOpenClawCronInstall({
   return { exists: false, verified: false, reason: 'not_found', source: 'openclaw cron list', verification };
 }
 
+function normalizeOpenClawCronDeliveryForStore(delivery) {
+  return {
+    mode: 'announce',
+    channel: String(delivery?.channel || 'last').trim() || 'last',
+    to: String(delivery?.to || '').trim(),
+  };
+}
+
+function repairOpenClawCronDeliveryRecords(records, verification) {
+  let repaired = 0;
+  const objects = collectObjects(records);
+
+  for (const job of objects) {
+    if (!job || typeof job !== 'object') continue;
+    const directName = typeof job.name === 'string' ? job.name : typeof job.title === 'string' ? job.title : '';
+    if (directName !== verification.name) continue;
+
+    const blob = normalizeCronComparable(JSON.stringify(job));
+    const missing = verification.requiredFragments.filter(
+      (fragment) => !blob.includes(normalizeCronComparable(fragment)),
+    );
+    if (missing.length > 0 || hasExpectedOpenClawCronDelivery(job, verification)) continue;
+
+    job.delivery = normalizeOpenClawCronDeliveryForStore(verification.delivery);
+    repaired += 1;
+  }
+
+  return repaired;
+}
+
+export async function repairOpenClawCronDeliveryStore({
+  configPath,
+  config = {},
+  readFile,
+  writeFile,
+  home = process.env.HOME,
+}) {
+  if (!readFile || !writeFile || !home) {
+    return { ok: false, repaired: false, reason: 'missing_io' };
+  }
+
+  const verification = buildOpenClawCronVerification(configPath, config);
+  const jobStorePaths = [
+    path.join(home, '.openclaw', 'cron', 'jobs.json'),
+    path.join(home, '.config', 'openclaw', 'cron', 'jobs.json'),
+  ];
+
+  for (const filePath of jobStorePaths) {
+    let raw = '';
+    let parsed = null;
+    try {
+      raw = await readFile(filePath, 'utf8');
+      parsed = parseJsonMaybe(raw);
+    } catch {
+      continue;
+    }
+    if (!parsed) continue;
+
+    const repairedCount = repairOpenClawCronDeliveryRecords(parsed, verification);
+    if (repairedCount === 0) continue;
+
+    await writeFile(filePath, `${JSON.stringify(parsed, null, 2)}\n`, 'utf8');
+    return { ok: true, repaired: true, repairedCount, path: filePath, verification };
+  }
+
+  return { ok: true, repaired: false, reason: 'not_found', verification };
+}
+
 export function buildHermesGrowthPrompt(configPath, config = {}) {
   const statePath = deriveStatePathFromConfigPath(configPath);
   const proofPath = deriveSchedulerProofPathFromStatePath(statePath);

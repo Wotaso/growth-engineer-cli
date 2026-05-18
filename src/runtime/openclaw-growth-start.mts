@@ -16,6 +16,7 @@ import {
   buildHermesCronCreateCommand,
   inspectHermesCronInstall,
   inspectOpenClawCronInstall,
+  repairOpenClawCronDeliveryStore,
 } from './openclaw-growth-shared.mjs';
 import { applyOpenClawSecretRefs, loadOpenClawGrowthSecrets } from './openclaw-growth-env.mjs';
 
@@ -759,6 +760,28 @@ async function ensureOpenClawCronSchedule(configPath, config, mode = 'auto') {
       source: inspection.source,
       proof,
     };
+  }
+
+  if (inspection.exists && inspection.reason === 'delivery_mismatch') {
+    const repair = await repairOpenClawCronDeliveryStore({
+      configPath: displayConfigPath,
+      config,
+      readFile: fs.readFile,
+      writeFile: fs.writeFile,
+    });
+    if (repair.repaired) {
+      return {
+        ok: true,
+        enabled: true,
+        installed: true,
+        status: 'repaired_delivery',
+        detail: `Repaired OpenClaw cron delivery for "${automation.openclawCron.name}" in ${repair.path}`,
+        schedule: automation.openclawCron.schedule,
+        timezone: automation.openclawCron.timezone,
+        source: repair.path,
+        proof,
+      };
+    }
   }
 
   const add = await runShellCommand(addCommand, 60_000);
