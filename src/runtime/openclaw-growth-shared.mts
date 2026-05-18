@@ -231,6 +231,42 @@ export function buildOpenClawCronAddCommand(configPath, config = {}) {
   return command.join(' ');
 }
 
+function getOpenClawCronJobId(job) {
+  if (!job || typeof job !== 'object') return '';
+  for (const key of ['id', 'jobId', 'job_id', 'uuid']) {
+    const value = job[key];
+    if (typeof value === 'string' && value.trim()) return value.trim();
+  }
+  return '';
+}
+
+export function buildOpenClawCronEditDeliveryCommand(job, config = {}) {
+  const automation = getAutomationConfig(config).openclawCron;
+  const jobId = typeof job === 'string' ? job.trim() : getOpenClawCronJobId(job);
+  if (!jobId) return '';
+
+  const command = ['openclaw cron edit', quote(jobId)];
+  if (automation.delivery.enabled) {
+    command.push('--announce', '--channel', quote(automation.delivery.channel));
+    if (automation.delivery.to) {
+      command.push('--to', quote(automation.delivery.to));
+    }
+    command.push('--best-effort-deliver');
+  } else {
+    command.push('--no-deliver');
+  }
+  return command.join(' ');
+}
+
+export function getOpenClawCronEditDeliveryCommandFromInspection(inspection, config = {}) {
+  const jobs = Array.isArray(inspection?.jobs) ? inspection.jobs : [];
+  for (const job of jobs) {
+    const command = buildOpenClawCronEditDeliveryCommand(job, config);
+    if (command) return command;
+  }
+  return '';
+}
+
 function normalizeCronComparable(value) {
   return String(value || '')
     .replace(/\\"/g, '"')

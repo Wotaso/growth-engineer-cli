@@ -13,6 +13,7 @@ import {
   getActionMode,
   getAutomationConfig,
   getDefaultSourceCommand,
+  getOpenClawCronEditDeliveryCommandFromInspection,
   buildHermesCronCreateCommand,
   inspectHermesCronInstall,
   inspectOpenClawCronInstall,
@@ -763,6 +764,25 @@ async function ensureOpenClawCronSchedule(configPath, config, mode = 'auto') {
   }
 
   if (inspection.exists && inspection.reason === 'delivery_mismatch') {
+    const editCommand = getOpenClawCronEditDeliveryCommandFromInspection(inspection, config);
+    if (editCommand) {
+      const edit = await runShellCommand(editCommand, 60_000);
+      if (edit.ok) {
+        return {
+          ok: true,
+          enabled: true,
+          installed: true,
+          status: 'repaired_delivery_cli',
+          detail: `Repaired OpenClaw cron delivery with: ${editCommand}`,
+          schedule: automation.openclawCron.schedule,
+          timezone: automation.openclawCron.timezone,
+          command: editCommand,
+          source: inspection.source,
+          proof,
+        };
+      }
+    }
+
     const repair = await repairOpenClawCronDeliveryStore({
       configPath: displayConfigPath,
       config,
@@ -779,6 +799,7 @@ async function ensureOpenClawCronSchedule(configPath, config, mode = 'auto') {
         schedule: automation.openclawCron.schedule,
         timezone: automation.openclawCron.timezone,
         source: repair.path,
+        command: editCommand || undefined,
         proof,
       };
     }
