@@ -277,8 +277,8 @@ Usage:
   npx -y @analyticscli/growth-engineer@preview wizard [--out <config-path>]
   npx -y @analyticscli/growth-engineer@preview wizard --connectors [analytics,github,revenuecat,sentry,coolify,asc] [--config <config-path>]
 
-Compatibility fallback:
-  node scripts/openclaw-growth-wizard.mjs --connectors [analytics,github,revenuecat,sentry,coolify,asc] [--config <config-path>]
+Compatibility note:
+  Existing cron/heartbeat runners may still execute generated runtime scripts, but user-facing setup and connector repair should use the npx command above.
 
 Options:
   --no-self-update   Skip the ClawHub skill update check for this run

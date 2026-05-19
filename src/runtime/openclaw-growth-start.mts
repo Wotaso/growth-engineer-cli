@@ -645,13 +645,13 @@ function renderHeartbeatBlock(configPath, config) {
   const displayConfigPath = relativeWorkspacePath(configPath);
   const displayStatePath = deriveStatePathFromConfigPath(displayConfigPath);
   const runnerCommand = buildGrowthRunnerCommand(displayConfigPath, displayStatePath);
-  const wizardConfigArg = `--config ${displayConfigPath}`;
+  const wizardCommand = `npx -y @analyticscli/growth-engineer@preview wizard --connectors --config ${displayConfigPath}`;
   return `${HEARTBEAT_MARKER_START}
 tasks:
 
 - name: openclaw-growth-engineer-run
   interval: ${interval}
-  prompt: "Run \`${runnerCommand}\` from the workspace if the config and runtime files exist. The runner owns schedule.cadences, connectorHealthCheckIntervalMinutes, skipIfNoDataChange, and skipIfIssueSetUnchanged. If it reports connector-health alerts, production crashes, generated issues, or actionable growth findings, summarize only the action and evidence. If setup files are missing, tell the user to run \`node scripts/openclaw-growth-wizard.mjs --connectors ${wizardConfigArg}\`. If there is no actionable output, reply HEARTBEAT_OK."
+  prompt: "Run \`${runnerCommand}\` from the workspace if the config and runtime files exist. The runner owns schedule.cadences, connectorHealthCheckIntervalMinutes, skipIfNoDataChange, and skipIfIssueSetUnchanged. If it reports connector-health alerts, production crashes, generated issues, or actionable growth findings, summarize only the action and evidence. If setup files are missing, tell the user to run \`${wizardCommand}\`. If there is no actionable output, reply HEARTBEAT_OK."
 
 # Keep this section small. Do not put secrets in HEARTBEAT.md.
 ${HEARTBEAT_MARKER_END}`;
@@ -1936,7 +1936,7 @@ function remediationForCheck(checkName, configPath) {
     return 'Write `data/openclaw-growth-engineer/analytics_summary.json` via your analytics refresh step (API-key based source command/file generation).';
   }
   if (checkName === 'connection:analytics') {
-    return 'Run `node scripts/openclaw-growth-wizard.mjs --connectors analytics` and paste a fresh AnalyticsCLI readonly CLI token into the local terminal wizard.';
+    return 'Run `npx -y @analyticscli/growth-engineer@preview wizard --connectors analytics` and paste a fresh AnalyticsCLI readonly CLI token into the local terminal wizard.';
   }
   if (checkName === 'connection:github') {
     return 'Verify `GITHUB_TOKEN` and repo access to `/repos/<owner>/<repo>` + issues API.';

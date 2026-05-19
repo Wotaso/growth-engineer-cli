@@ -10,6 +10,7 @@ import { applyOpenClawSecretRefs, loadOpenClawGrowthSecrets } from './openclaw-g
 const DEFAULT_CONFIG_PATH = 'data/openclaw-growth-engineer/config.json';
 const DEFAULT_TIMEOUT_MS = 15_000;
 const RUNTIME_DIR = path.dirname(fileURLToPath(import.meta.url));
+const WIZARD_COMMAND = 'npx -y @analyticscli/growth-engineer@preview wizard';
 
 type ShellResult = {
   ok: boolean;
@@ -262,11 +263,11 @@ async function checkGitHub(config, timeoutMs) {
     return authCheck.ok ? connector('connected', 'GITHUB_TOKEN is valid; repo selection is deferred per app/task', {
       repoScope: 'per_app_or_task',
     }) : connector('blocked', 'GITHUB_TOKEN is set, but GitHub auth check failed', {
-      nextAction: 'Run: node scripts/openclaw-growth-wizard.mjs --connectors github.',
+      nextAction: `Run: ${WIZARD_COMMAND} --connectors github.`,
     });
   }
   return connector('not_connected', hasRepo ? 'No GITHUB_TOKEN or gh auth found' : 'project.githubRepo is not configured', {
-    nextAction: 'Run: node scripts/openclaw-growth-wizard.mjs --connectors github.',
+    nextAction: `Run: ${WIZARD_COMMAND} --connectors github.`,
   });
 }
 
@@ -330,7 +331,7 @@ function summarizeSentry(preflight, config) {
     return connector('partial', command?.detail || 'Sentry API auth passed, exporter smoke test did not pass');
   }
   return connector('blocked', connection?.detail || 'Sentry connection was not verified', {
-    nextAction: 'Run: node scripts/openclaw-growth-wizard.mjs --connectors sentry.',
+    nextAction: `Run: ${WIZARD_COMMAND} --connectors sentry.`,
   });
 }
 
@@ -347,7 +348,7 @@ function summarizeCoolify(preflight, config) {
     return connector('partial', command?.detail || 'Coolify API auth passed, exporter smoke test did not pass');
   }
   return connector('blocked', connection?.detail || 'Coolify connection was not verified', {
-    nextAction: 'Run: node scripts/openclaw-growth-wizard.mjs --connectors coolify.',
+    nextAction: `Run: ${WIZARD_COMMAND} --connectors coolify.`,
   });
 }
 
