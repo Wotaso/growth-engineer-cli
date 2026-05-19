@@ -200,6 +200,7 @@ export function buildOpenClawGrowthSystemEvent(configPath, config = {}) {
     `After the command finishes, inspect ${statePath} and ${proofPath}.`,
     'Always let the runner write state and proof logs. For social/chat output, only summarize new or changed findings, connector-health changes, delivery failures, or runner failures.',
     'If the runner completes with skippedReason issue_set_unchanged or no_data_change, reply exactly HEARTBEAT_OK and do not repeat old findings.',
+    'Persisted connectorHealth.lastStatusOk=false is not by itself a new event. If the latest proof says connector_health_not_due, connector_health_unchanged, or socialOutput HEARTBEAT_OK, reply exactly HEARTBEAT_OK.',
     'If connector health is healthy, no production issue is found, and no actionable growth finding was generated, reply HEARTBEAT_OK.',
     `Expected OpenClaw cron schedule: ${automation.openclawCron.schedule} ${automation.openclawCron.timezone}.`,
   ].join(' ');
@@ -542,6 +543,8 @@ export function buildHermesGrowthPrompt(configPath, config = {}) {
     `Execute: ${command}`,
     'The runner is the source of truth for connector health, daily, weekly, monthly, quarterly, six-month, and yearly cadence decisions.',
     `After the command finishes, inspect ${statePath} and ${proofPath}.`,
+    'For social/chat output, only summarize new or changed findings, connector-health changes, delivery failures, or runner failures.',
+    'Persisted connectorHealth.lastStatusOk=false is not by itself a new event. If the latest proof says issue_set_unchanged, no_data_change, connector_health_not_due, connector_health_unchanged, or socialOutput HEARTBEAT_OK, reply exactly HEARTBEAT_OK.',
     'If connector health is healthy, no production issue is found, and no actionable growth finding was generated, reply HEARTBEAT_OK.',
     `Expected Hermes cron schedule: ${automation.hermesCron.schedule}.`,
   ].join(' ');
