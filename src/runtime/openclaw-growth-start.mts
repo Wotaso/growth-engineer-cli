@@ -645,7 +645,7 @@ function renderHeartbeatBlock(configPath, config) {
   const displayConfigPath = relativeWorkspacePath(configPath);
   const displayStatePath = deriveStatePathFromConfigPath(displayConfigPath);
   const runnerCommand = buildGrowthRunnerCommand(displayConfigPath, displayStatePath);
-  const wizardCommand = `npx -y @analyticscli/growth-engineer@preview wizard --connectors --config ${displayConfigPath}`;
+  const wizardCommand = 'npx -y @analyticscli/growth-engineer@preview wizard --connectors';
   return `${HEARTBEAT_MARKER_START}
 tasks:
 

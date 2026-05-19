@@ -677,7 +677,7 @@ function connectorWizardKey(key) {
 function buildConnectorWizardCommand(configPath, entry) {
   const connector = connectorWizardKey(entry.key);
   if (!connector) return null;
-  return `npx -y @analyticscli/growth-engineer@preview wizard --connectors ${quote(connector)} --config ${quote(configPath)}`;
+  return `npx -y @analyticscli/growth-engineer@preview wizard --connectors ${quote(connector)}`;
 }
 
 function isAscWebAuthIssue(entry) {
