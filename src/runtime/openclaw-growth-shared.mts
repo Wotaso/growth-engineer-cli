@@ -198,6 +198,8 @@ export function buildOpenClawGrowthSystemEvent(configPath, config = {}) {
     'If any dependency asks for sudo or a password, stop and report the blocked non-interactive command instead of prompting.',
     'The runner is the source of truth for connector health, daily, weekly, monthly, quarterly, six-month, and yearly cadence decisions.',
     `After the command finishes, inspect ${statePath} and ${proofPath}.`,
+    'Always let the runner write state and proof logs. For social/chat output, only summarize new or changed findings, connector-health changes, delivery failures, or runner failures.',
+    'If the runner completes with skippedReason issue_set_unchanged or no_data_change, reply exactly HEARTBEAT_OK and do not repeat old findings.',
     'If connector health is healthy, no production issue is found, and no actionable growth finding was generated, reply HEARTBEAT_OK.',
     `Expected OpenClaw cron schedule: ${automation.openclawCron.schedule} ${automation.openclawCron.timezone}.`,
   ].join(' ');
