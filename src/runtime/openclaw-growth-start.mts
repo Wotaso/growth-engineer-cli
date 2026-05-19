@@ -1482,6 +1482,15 @@ function commandHasAscAppFlag(command) {
   return /(^|\s)--app(\s|=|$)/.test(String(command || ''));
 }
 
+function removeAscAppFlag(command) {
+  const raw = String(command || '').trim();
+  if (!raw || !commandHasAscAppFlag(raw)) return raw;
+  return raw
+    .replace(/(^|\s)--app(?:=(?:"[^"]*"|'[^']*'|\S+)|\s+(?:"[^"]*"|'[^']*'|\S+))/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 function appendAscAppFlag(command, appId) {
   const raw = String(command || '').trim();
   if (!raw || commandHasAscAppFlag(raw)) return raw;
@@ -1553,6 +1562,36 @@ async function configureAscApp(configPath, appId) {
     await writeJson(configPath, config);
   }
   process.env.ASC_APP_ID = normalizedAppId;
+  return changed;
+}
+
+async function configureAscAllApps(configPath) {
+  const config = await readJson(configPath);
+  let changed = false;
+  const extraSources = Array.isArray(config?.sources?.extra) ? config.sources.extra : [];
+
+  for (const source of extraSources) {
+    if (!source || typeof source !== 'object') continue;
+    const service = String(source.service || source.key || '').trim().toLowerCase();
+    if (!['asc', 'asc-cli', 'app-store-connect', 'app_store_connect'].includes(service)) continue;
+    if (source.mode === 'command' && source.command) {
+      const nextCommand = removeAscAppFlag(source.command);
+      if (nextCommand !== source.command) {
+        source.command = nextCommand;
+        changed = true;
+      }
+    }
+  }
+
+  if (config.project && typeof config.project === 'object' && config.project.ascAppId) {
+    delete config.project.ascAppId;
+    changed = true;
+  }
+
+  if (changed) {
+    await writeJson(configPath, config);
+  }
+  delete process.env.ASC_APP_ID;
   return changed;
 }
 
@@ -1634,11 +1673,7 @@ async function ensureAscAppConfigured(configPath, explicitAppId) {
     return { ok: true, configured: false, changed: false, appId: null, appScope: 'disabled', needsUserInput: false };
   }
 
-  const configuredAppId = normalizeString(config.project?.ascAppId) || normalizeString(process.env.ASC_APP_ID);
-  if (configuredAppId) {
-    const changed = await configureAscApp(configPath, configuredAppId);
-    return { ok: true, configured: true, changed, appId: configuredAppId, appScope: 'single_app', needsUserInput: false };
-  }
+  const changed = await configureAscAllApps(configPath);
 
   const appList = await listAscApps();
   if (!appList.ok) {
@@ -1655,12 +1690,148 @@ async function ensureAscAppConfigured(configPath, explicitAppId) {
   return {
     ok: true,
     configured: true,
-    changed: false,
+    changed,
     appId: null,
     appScope: 'all_accessible_apps',
     apps: appList.apps,
     appCount: appList.apps.length,
     needsUserInput: false,
+  };
+}
+
+function extractAscAnalyticsRequestIds(payload) {
+  const candidates = (() => {
+    if (Array.isArray(payload)) return payload;
+    if (payload && typeof payload === 'object') {
+      if (Array.isArray(payload.requests)) return payload.requests;
+      if (Array.isArray(payload.analyticsReportRequests)) return payload.analyticsReportRequests;
+      if (Array.isArray(payload.items)) return payload.items;
+      if (Array.isArray(payload.data)) return payload.data;
+    }
+    return [];
+  })();
+
+  const ids = [];
+  for (const candidate of candidates) {
+    if (!candidate || typeof candidate !== 'object') continue;
+    const id = normalizeString(candidate.id) || normalizeString(candidate.requestId) || normalizeString(candidate.request_id);
+    if (id) ids.push(id);
+  }
+  return [...new Set(ids)];
+}
+
+function extractAscAnalyticsRequestId(payload) {
+  if (payload && typeof payload === 'object') {
+    const id = normalizeString(payload.id) || normalizeString(payload.requestId) || normalizeString(payload.request_id);
+    if (id) return id;
+  }
+  return extractAscAnalyticsRequestIds(payload)[0] || null;
+}
+
+async function listAscAnalyticsRequests(appId, state = '') {
+  const stateArg = state ? ` --state ${quote(state)}` : '';
+  const result = await runShellCommand(`asc analytics requests --app ${quote(appId)}${stateArg} --output json`, 60_000);
+  if (!result.ok) {
+    return { ok: false, ids: [], error: result.stderr || `exit ${result.code}` };
+  }
+  return { ok: true, ids: extractAscAnalyticsRequestIds(parseJsonFromStdout(result.stdout)), error: null };
+}
+
+async function ensureAscAnalyticsRequest(appId) {
+  const normalizedAppId = normalizeString(appId);
+  if (!normalizedAppId) {
+    return { ok: true, status: 'skipped', requestId: null, detail: 'no single ASC app configured' };
+  }
+
+  const completedRequests = await listAscAnalyticsRequests(normalizedAppId, 'COMPLETED');
+  if (!completedRequests.ok) {
+    return { ok: false, status: 'query_failed', requestId: null, error: completedRequests.error };
+  }
+  if (completedRequests.ids.length > 0) {
+    return { ok: true, status: 'completed', requestId: completedRequests.ids[0], detail: `completed request ${completedRequests.ids[0]}` };
+  }
+
+  const existingRequests = await listAscAnalyticsRequests(normalizedAppId);
+  if (!existingRequests.ok) {
+    return { ok: false, status: 'query_failed', requestId: null, error: existingRequests.error };
+  }
+  if (existingRequests.ids.length > 0) {
+    return { ok: true, status: 'pending', requestId: existingRequests.ids[0], detail: `existing request ${existingRequests.ids[0]} is not completed yet` };
+  }
+
+  const created = await runShellCommand(
+    `asc analytics request --app ${quote(normalizedAppId)} --access-type ONGOING --output json`,
+    60_000,
+  );
+  if (!created.ok) {
+    return { ok: false, status: 'create_failed', requestId: null, error: created.stderr || `exit ${created.code}` };
+  }
+
+  const requestId = extractAscAnalyticsRequestId(parseJsonFromStdout(created.stdout));
+  return {
+    ok: true,
+    status: 'created',
+    requestId,
+    detail: requestId
+      ? `created ongoing request ${requestId}; report instances will appear after Apple processing`
+      : 'created ongoing request; report instances will appear after Apple processing',
+  };
+}
+
+async function ensureAscAnalyticsRequestsForAppScope(ascAppSetup) {
+  if (!ascAppSetup?.ok || ascAppSetup.appScope === 'disabled') {
+    return { ok: true, status: 'skipped', requestId: null, requestIds: [], detail: 'ASC source is not enabled', results: [] };
+  }
+
+  const apps = ascAppSetup.appId
+    ? [{ id: ascAppSetup.appId }]
+    : Array.isArray(ascAppSetup.apps)
+      ? ascAppSetup.apps.filter((app) => normalizeString(app?.id))
+      : [];
+
+  if (apps.length === 0) {
+    return { ok: true, status: 'skipped', requestId: null, requestIds: [], detail: 'no accessible ASC apps found', results: [] };
+  }
+
+  const results = [];
+  for (const app of apps) {
+    const result = await ensureAscAnalyticsRequest(app.id);
+    results.push({
+      appId: app.id,
+      appName: app.name || null,
+      ...result,
+    });
+  }
+
+  const failures = results.filter((result) => !result.ok);
+  if (failures.length > 0) {
+    return {
+      ok: false,
+      status: failures.length === results.length ? 'failed' : 'partial_failed',
+      requestId: null,
+      requestIds: results.map((result) => result.requestId).filter(Boolean),
+      results,
+      error: failures
+        .map((failure) => `${failure.appName || failure.appId}: ${failure.error || failure.status || 'unknown error'}`)
+        .join('; '),
+    };
+  }
+
+  const counts = results.reduce((memo, result) => {
+    memo[result.status] = (memo[result.status] || 0) + 1;
+    return memo;
+  }, {});
+  const detail = Object.entries(counts)
+    .map(([status, count]) => `${count} ${status}`)
+    .join(', ');
+
+  return {
+    ok: true,
+    status: 'ok',
+    requestId: results[0]?.requestId || null,
+    requestIds: results.map((result) => result.requestId).filter(Boolean),
+    detail: `checked ${results.length} ASC app(s): ${detail}`,
+    results,
   };
 }
 
@@ -1774,7 +1945,7 @@ function remediationForCheck(checkName, configPath) {
     return 'Verify `GITHUB_TOKEN` and repo access to `/repos/<owner>/<repo>/pulls`, plus `Pull requests: Read/Write` and `Contents: Read/Write` scopes.';
   }
   if (checkName === 'connection:asc_cli') {
-    return 'ASC setup should list App Store Connect apps and persist the selected app automatically. Rerun the connector wizard; if this repeats, update the skill/CLI rather than setting ASC_APP_ID by hand.';
+    return 'ASC setup should list all App Store Connect apps the API key can access. Rerun the connector wizard with an API key scoped to the whole account; do not set ASC_APP_ID for normal Growth Engineer runs.';
   }
   return 'Fix this blocker and rerun start.';
 }
@@ -2066,6 +2237,58 @@ async function main() {
     return;
   }
 
+  emitProgress(args.progressJson, {
+    phase: 'start',
+    key: 'ascAnalyticsRequest',
+    label: 'ASC analytics reports',
+    detail: 'checking ongoing Analytics Report Request',
+  });
+  const ascAnalyticsRequestSetup = await ensureAscAnalyticsRequestsForAppScope(ascAppSetup);
+  emitProgress(args.progressJson, {
+    phase: 'finish',
+    key: 'ascAnalyticsRequest',
+    label: 'ASC analytics reports',
+    detail: ascAnalyticsRequestSetup.ok
+      ? ascAnalyticsRequestSetup.detail
+      : `could not ensure Analytics Report Request (${truncate(ascAnalyticsRequestSetup.error, 240)})`,
+    status: ascAnalyticsRequestSetup.ok ? 'pass' : 'fail',
+  });
+  if (!ascAnalyticsRequestSetup.ok) {
+    process.stdout.write(
+      `${JSON.stringify(
+        {
+          ok: false,
+          phase: 'asc_analytics_request_setup',
+          configCreated: configResult.created,
+          configPath,
+          heartbeat,
+          openclawCron,
+          hermesCron,
+          projectConfigured: projectConfigured || analyticsProjectSetup.configured,
+          analyticsProjectId: analyticsProjectSetup.projectId || null,
+          ascAppConfigured: ascAppSetup.configured,
+          ascAppId: ascAppSetup.appId || null,
+          ascAppScope: ascAppSetup.appScope || null,
+          ascAnalyticsRequestResults: ascAnalyticsRequestSetup.results || [],
+          connectorSetup,
+          needsUserInput: false,
+          question: null,
+          blockers: [
+            {
+              check: 'connection:asc_analytics_request',
+              detail: `Could not ensure App Store Connect Analytics Report Request: ${truncate(ascAnalyticsRequestSetup.error, 800)}`,
+              remediation: 'Use an ASC API key with Admin for first setup so Growth Engineer can create the ongoing Analytics Report Request. After the request exists, rotate to Sales and Reports for steady-state downloads.',
+            },
+          ],
+        },
+        null,
+        2,
+      )}\n`,
+    );
+    process.exitCode = 1;
+    return;
+  }
+
   const preflightResult = await runPreflight(configPath, args.testConnections, args.progressJson, args.onlyConnectors);
   const preflightPayload = preflightResult.payload;
 
@@ -2100,6 +2323,9 @@ async function main() {
           ascAppConfigured: ascAppSetup.configured,
           ascAppId: ascAppSetup.appId || null,
           ascAppScope: ascAppSetup.appScope || null,
+          ascAnalyticsRequestStatus: ascAnalyticsRequestSetup.status,
+          ascAnalyticsRequestId: ascAnalyticsRequestSetup.requestId || null,
+          ascAnalyticsRequestIds: ascAnalyticsRequestSetup.requestIds || [],
           githubRepo: configResult.githubRepo,
           connectorSetup,
           checks: preflightPayload.checks || [],
@@ -2129,6 +2355,9 @@ async function main() {
           ascAppConfigured: ascAppSetup.configured,
           ascAppId: ascAppSetup.appId || null,
           ascAppScope: ascAppSetup.appScope || null,
+          ascAnalyticsRequestStatus: ascAnalyticsRequestSetup.status,
+          ascAnalyticsRequestId: ascAnalyticsRequestSetup.requestId || null,
+          ascAnalyticsRequestIds: ascAnalyticsRequestSetup.requestIds || [],
           connectorSetup,
           schedulerProofPath,
           message: 'Preflight passed. First run skipped due to --setup-only.',

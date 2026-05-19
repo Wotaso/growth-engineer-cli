@@ -2986,11 +2986,18 @@ async function guideAscConnector(rl, secrets: Record<string, string>) {
   process.stdout.write('Create an App Store Connect API key here:\n  https://appstoreconnect.apple.com/access/integrations/api\n\n');
   process.stdout.write('Roles to choose for this key:\n');
   printBullets([
-    'Required: Sales, for App Analytics, Sales and Trends, downloads, revenue, and conversion context.',
+    'Required for first setup: Admin, because Apple only allows Admin keys to create the initial Analytics Report Request.',
+    'Required for steady-state report downloads after the request exists: Sales and Reports, Finance, or Admin.',
     'Recommended: Customer Support, for App Store ratings and review text.',
     'Recommended: Developer, for builds, TestFlight, and delivery status.',
     'Optional: App Manager, only if OpenClaw should also read or manage app metadata, pricing, or release settings.',
-    'Avoid: Admin unless a one-off App Store Connect permission requires it.',
+    'Least privilege option: run setup once with Admin, then rotate Growth Engineer to a Sales and Reports key for ongoing analytics downloads.',
+  ]);
+  process.stdout.write('\nWhy Admin is requested during setup:\n');
+  printBullets([
+    'Growth Engineer automatically creates an ongoing App Analytics report request when none exists.',
+    'Without that request, Apple will not generate Impressions, Product Page Views, App Units, Conversion Rate, and related report instances.',
+    'A non-Admin key can read existing reports, but creation fails with a forbidden response.',
   ]);
   process.stdout.write('\nAfter creating the key, copy these values into this wizard:\n');
   printBullets([
@@ -2998,6 +3005,7 @@ async function guideAscConnector(rl, secrets: Record<string, string>) {
     'Key ID from the API key row or from the downloaded file name: AuthKey_<KEY_ID>.p8.',
     'Download the .p8 file, open it, then paste the full file content into this terminal.',
     'If the .p8 is already on this host, leave the content prompt empty and paste the file path instead.',
+    'Vendor Number from App Store Connect Sales and Trends > Reports, needed for Sales and Trends/App Units reports.',
   ]);
 
   const keyId = await ask(rl, 'ASC_KEY_ID (leave empty to skip)', process.env.ASC_KEY_ID || '');
@@ -3017,6 +3025,13 @@ async function guideAscConnector(rl, secrets: Record<string, string>) {
     const privateKeyPath = await askAscPrivateKeyPath(rl);
     if (privateKeyPath.trim()) secrets.ASC_PRIVATE_KEY_PATH = privateKeyPath.trim();
   }
+
+  const vendorNumber = await ask(
+    rl,
+    'ASC_VENDOR_NUMBER for Sales and Trends/App Units (leave empty to skip)',
+    process.env.ASC_VENDOR_NUMBER || process.env.ASC_ANALYTICS_VENDOR_NUMBER || '',
+  );
+  if (vendorNumber.trim()) secrets.ASC_VENDOR_NUMBER = vendorNumber.trim();
 }
 
 async function shouldRunSelfUpdate(workspaceRoot, force) {

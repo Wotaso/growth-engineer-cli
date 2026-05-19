@@ -42,7 +42,7 @@ function parseArgs(argv) {
   const defaultEnd = formatDate(addDays(new Date(), -1));
   const defaultStart = formatDate(addDays(parseDate(defaultEnd), -29));
   const args = {
-    app: String(process.env.ASC_APP_ID || '').trim(),
+    app: '',
     out: '',
     start: String(process.env.ASC_ANALYTICS_START || defaultStart).trim(),
     end: String(process.env.ASC_ANALYTICS_END || defaultEnd).trim(),

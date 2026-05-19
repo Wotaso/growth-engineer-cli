@@ -261,6 +261,12 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function isTransientNetworkFailure(value) {
+  return /NETWORK_ERROR|fetch failed|tlsv1 alert|SSL routines|ECONNRESET|ECONNREFUSED|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|socket hang up|network timeout|Temporary failure|upstream connect error|disconnect\/reset before headers|HTTP 5\d\d|API 5\d\d/i.test(
+    String(value || ''),
+  );
+}
+
 function isTruthyEnv(value) {
   return ['1', 'true', 'yes', 'y', 'on'].includes(String(value || '').trim().toLowerCase());
 }
@@ -1542,9 +1548,17 @@ async function resolveSourcePayloadWithCursor(sourceConfig, sourceName, cursorSt
       sourceConfig,
       cursorState,
     );
-    const result = await runShellCommand(String(resolvedCommand), 120_000, { cwd: commandCwd });
+    let result = await runShellCommand(String(resolvedCommand), 120_000, { cwd: commandCwd });
+    let retried = false;
+    if (!result.ok && isTransientNetworkFailure(result.stderr || result.stdout)) {
+      retried = true;
+      await sleep(1_500);
+      result = await runShellCommand(String(resolvedCommand), 120_000, { cwd: commandCwd });
+    }
     if (!result.ok) {
-      throw new Error(`Source "${sourceName}" command failed: ${result.stderr || `exit ${result.code}`}`);
+      throw new Error(
+        `Source "${sourceName}" command failed: ${retried ? 'transient network error persisted after retry: ' : ''}${result.stderr || `exit ${result.code}`}`,
+      );
     }
     const fetchedAt = new Date().toISOString();
     try {
@@ -1556,6 +1570,7 @@ async function resolveSourcePayloadWithCursor(sourceConfig, sourceName, cursorSt
                 lastCollectedAt: fetchedAt,
                 updatedAt: fetchedAt,
                 lastCommand: resolvedCommand,
+                lastRetriedTransientFailureAt: retried ? fetchedAt : null,
               }
             : cursorState || null,
         resolvedCommand,
