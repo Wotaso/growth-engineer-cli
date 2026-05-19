@@ -728,6 +728,121 @@ function buildConnectorHealthAlert(statusPayload, unhealthyConnectors) {
   return `${lines.join('\n')}\n`;
 }
 
+function sourceFailureConnectorKey(failure) {
+  const service = String(failure?.service || '').toLowerCase();
+  const key = String(failure?.key || '').toLowerCase();
+  if (service.includes('sentry') || key === 'glitchtip') return 'sentry';
+  if (service.includes('revenuecat')) return 'revenuecat';
+  if (service.includes('coolify')) return 'coolify';
+  if (service.includes('github')) return 'github';
+  if (key === 'analytics') return 'analyticscli';
+  return String(failure?.key || 'source');
+}
+
+function buildSourceFailureStatusPayload(configPath, sourceFailures) {
+  const connectors = {};
+  for (const failure of sourceFailures) {
+    const key = sourceFailureConnectorKey(failure);
+    const detail = `Source collection failed during scheduled run: ${failure.detail}`;
+    const retryable = Boolean(failure.retryable);
+    connectors[key] = {
+      status: 'partial',
+      detail,
+      nextAction: retryable
+        ? 'Provider returned a transient upstream/network error after retry. Rerun the Growth Engineer later; if it repeats, check the provider status page and connector credentials.'
+        : 'Run the connector wizard or source command on the host terminal and fix the reported source error.',
+    };
+  }
+  return {
+    generatedAt: new Date().toISOString(),
+    configPath,
+    connectors,
+    sourceFailures,
+  };
+}
+
+async function recordSourceCollectionFailures({ config, configPath, state, statePath, runtimeDir, sourceFailures }) {
+  if (sourceFailures.length === 0) {
+    return {
+      ...state,
+      lastSourceCollectionFailures: [],
+    };
+  }
+
+  const healthState = state?.connectorHealth || {};
+  const checkedAt = new Date().toISOString();
+  const statusPayload = buildSourceFailureStatusPayload(configPath, sourceFailures);
+  const unhealthyConnectors = getUnhealthyConfiguredConnectors(statusPayload);
+  const fingerprint = buildConnectorHealthFingerprint(unhealthyConnectors);
+  const previousExternallyDeliveredFingerprint = healthState.lastExternalAlertedFingerprint || null;
+  let alertTriggered = false;
+  let alertDeliveries: any[] = [];
+  const nextHealthState: Record<string, any> = {
+    ...healthState,
+    lastCheckedAt: checkedAt,
+    lastStatusOk: false,
+    lastFingerprint: fingerprint,
+    activeIncidentFingerprint: fingerprint,
+    lastError: sourceFailures.map((failure) => `${failure.key}: ${failure.detail}`).join('\n'),
+  };
+
+  if (previousExternallyDeliveredFingerprint !== fingerprint) {
+    const message = buildConnectorHealthAlert(statusPayload, unhealthyConnectors);
+    const paths = await writeConnectorHealthAlert(runtimeDir, message, statusPayload, unhealthyConnectors, fingerprint);
+    const deliveries = await deliverConnectorHealthAlert({
+      config,
+      configPath,
+      message,
+      statusPayload,
+      unhealthyConnectors,
+      fingerprint,
+    });
+    alertTriggered = true;
+    alertDeliveries = deliveries;
+    nextHealthState.lastAlertedAt = checkedAt;
+    nextHealthState.lastAlertedFingerprint = fingerprint;
+    nextHealthState.lastAlertMarkdownPath = paths.markdownPath;
+    nextHealthState.lastAlertJsonPath = paths.jsonPath;
+    nextHealthState.lastAlertDeliveries = deliveries;
+    nextHealthState.lastAlertExternalSent = hasSuccessfulExternalDelivery(deliveries);
+    if (nextHealthState.lastAlertExternalSent) {
+      nextHealthState.lastExternalAlertedAt = checkedAt;
+      nextHealthState.lastExternalAlertedFingerprint = fingerprint;
+    }
+  }
+
+  const nextState = {
+    ...state,
+    connectorHealth: nextHealthState,
+    lastSourceCollectionFailures: sourceFailures,
+  };
+  await fs.mkdir(path.dirname(statePath), { recursive: true });
+  await fs.writeFile(statePath, JSON.stringify(nextState, null, 2), 'utf8');
+  await appendSchedulerProof('source_collection_degraded', {
+    configPath,
+    statePath,
+    checkedAt,
+    sourceFailures: sourceFailures.map((failure) => ({
+      key: failure.key,
+      detail: failure.detail,
+      retryable: failure.retryable,
+    })),
+    unhealthyConnectors: unhealthyConnectors.map((entry) => ({
+      key: entry.key,
+      status: entry.status,
+      detail: entry.detail,
+    })),
+    alertTriggered,
+    deliveryCount: alertDeliveries.length,
+    externalDeliverySent: alertTriggered ? hasSuccessfulExternalDelivery(alertDeliveries) : false,
+    socialOutput: alertTriggered ? 'CONNECTOR_HEALTH_ALERT' : 'HEARTBEAT_OK',
+    socialReason: alertTriggered
+      ? 'new or changed source-collection connector incident'
+      : 'source-collection connector incident unchanged',
+  });
+  return nextState;
+}
+
 async function writeConnectorHealthAlert(runtimeDir, message, statusPayload, unhealthyConnectors, fingerprint) {
   const alertDir = path.join(runtimeDir, 'connector-health');
   await ensureDir(alertDir);
@@ -1594,10 +1709,29 @@ async function resolveSourcePayloadWithCursor(sourceConfig, sourceName, cursorSt
 async function loadSourcePayloads(config, state, configPath) {
   const payloads = {};
   const sourceCursors = { ...(state?.sourceCursors || {}) };
+  const sourceFailures: any[] = [];
   const commandCwd = getProjectCommandCwd(config);
   for (const source of getAllSourceEntries(config)) {
     const currentCursor = sourceCursors[source.key] || null;
-    const result = await resolveSourcePayloadWithCursor(source, source.key, currentCursor, commandCwd, configPath);
+    let result;
+    try {
+      result = await resolveSourcePayloadWithCursor(source, source.key, currentCursor, commandCwd, configPath);
+    } catch (error) {
+      if (source.key === 'analytics') {
+        throw error;
+      }
+      const detail = error instanceof Error ? error.message : String(error);
+      sourceFailures.push({
+        key: source.key,
+        label: source.label || source.key,
+        service: source.service || source.key,
+        detail,
+        retryable: isTransientNetworkFailure(detail),
+        failedAt: new Date().toISOString(),
+      });
+      process.stderr.write(`[${new Date().toISOString()}] Optional source "${source.key}" failed; continuing without it: ${detail}\n`);
+      continue;
+    }
     const payload = result.payload;
     if (payload) {
       payloads[source.key] = payload;
@@ -1609,6 +1743,7 @@ async function loadSourcePayloads(config, state, configPath) {
   return {
     payloads,
     sourceCursors,
+    sourceFailures,
   };
 }
 
@@ -1683,9 +1818,17 @@ async function runOnce(configPath, statePath) {
   });
   const activeCadences = getDueCadences(config, stateAfterHealthCheck);
 
-  const { payloads, sourceCursors } = await loadSourcePayloads(config, stateAfterHealthCheck, configPath);
+  const { payloads, sourceCursors, sourceFailures } = await loadSourcePayloads(config, stateAfterHealthCheck, configPath);
+  const stateAfterSourceCollection = await recordSourceCollectionFailures({
+    config,
+    configPath,
+    state: stateAfterHealthCheck,
+    statePath,
+    runtimeDir,
+    sourceFailures,
+  });
   const currentHashes = computeSourceHashes(payloads);
-  const changed = hasSourceChanges(stateAfterHealthCheck.sourceHashes, currentHashes);
+  const changed = hasSourceChanges(stateAfterSourceCollection.sourceHashes, currentHashes);
 
   if (activeCadences.length === 0 && !changed && config.schedule?.skipIfNoDataChange !== false) {
     process.stdout.write(`[${new Date().toISOString()}] No data changes. Skip run.\n`);
@@ -1696,6 +1839,7 @@ async function runOnce(configPath, statePath) {
       JSON.stringify(
         {
           ...stateAfterHealthCheck,
+          ...stateAfterSourceCollection,
           sourceHashes: currentHashes,
           sourceCursors,
           lastRunAt: completedAt,
@@ -1750,7 +1894,7 @@ async function runOnce(configPath, statePath) {
   });
 
   const issueFingerprint = buildIssueFingerprint(dryRun.issuesPayload);
-  const unchangedIssueSet = issueFingerprint === stateAfterHealthCheck.lastIssueFingerprint;
+  const unchangedIssueSet = issueFingerprint === stateAfterSourceCollection.lastIssueFingerprint;
 
   if (
     unchangedIssueSet &&
@@ -1764,12 +1908,13 @@ async function runOnce(configPath, statePath) {
       JSON.stringify(
         {
           ...stateAfterHealthCheck,
+          ...stateAfterSourceCollection,
           sourceHashes: currentHashes,
           sourceCursors,
           lastIssueFingerprint: issueFingerprint,
           lastRunAt: completedAt,
           lastOutFile: dryRun.outFile,
-          cadences: markCadencesRan(stateAfterHealthCheck, activeCadences, completedAt),
+          cadences: markCadencesRan(stateAfterSourceCollection, activeCadences, completedAt),
           lastGrowthRunNotifications: [
             {
               sent: false,
@@ -1832,12 +1977,13 @@ async function runOnce(configPath, statePath) {
     JSON.stringify(
       {
         ...stateAfterHealthCheck,
+        ...stateAfterSourceCollection,
         sourceHashes: currentHashes,
         sourceCursors,
         lastIssueFingerprint: issueFingerprint,
         lastRunAt: completedAt,
         lastOutFile: dryRun.outFile,
-        cadences: markCadencesRan(stateAfterHealthCheck, activeCadences, completedAt),
+        cadences: markCadencesRan(stateAfterSourceCollection, activeCadences, completedAt),
         lastGrowthRunNotifications: await deliverGrowthRunSummary({
           config,
           configPath,
