@@ -25,7 +25,7 @@ import { loadOpenClawGrowthSecrets } from './openclaw-growth-env.mjs';
 const DEFAULT_CONFIG_PATH = 'data/openclaw-growth-engineer/config.json';
 const SELF_UPDATE_INTERVAL_MS = 24 * 60 * 60 * 1000;
 const ENABLE_ISOLATED_SECRET_RUNNER_WIZARD = false;
-const DEFAULT_GROWTH_INTERVAL_MINUTES = 1440;
+const DEFAULT_GROWTH_INTERVAL_MINUTES = 90;
 const DEFAULT_CONNECTOR_HEALTH_INTERVAL_MINUTES = 360;
 const DEFAULT_SCHEDULER_PROOF_PATH = 'data/openclaw-growth-engineer/runtime/scheduler-proof.jsonl';
 const GROWTH_ENGINEER_PACKAGE_SPEC =
@@ -98,16 +98,28 @@ const CONNECTOR_DEFINITIONS: ConnectorDefinition[] = [
 
 const DEFAULT_CADENCE_PLAN = [
   {
+    key: 'healthcheck',
+    title: '90-minute production error healthcheck',
+    intervalMinutes: 90,
+    criticalOnly: true,
+    focusAreas: ['crash', 'deployment', 'availability'],
+    sourcePriorities: ['sentry', 'glitchtip', 'coolify', 'asc_cli'],
+    objective:
+      'Check Sentry/GlitchTip and Coolify for production errors, failed deploys, unhealthy resources, and availability blockers across every configured app.',
+    instructions:
+      'For Sentry/GlitchTip app errors, compare the issue release or app version with ASC production versions first. Ignore errors that only affect TestFlight, debug, staging, unreleased, or non-production app versions. Keep the social output short and action-oriented.',
+  },
+  {
     key: 'daily',
-    title: 'Daily Sentry and production guardrail',
+    title: 'Daily behavioral anomaly guardrail',
     intervalDays: 1,
     criticalOnly: true,
-    focusAreas: ['sentry_errors', 'crash', 'deployment', 'availability', 'onboarding', 'conversion', 'paywall', 'purchase'],
-    sourcePriorities: ['sentry', 'glitchtip', 'coolify', 'analytics', 'revenuecat', 'asc_cli', 'feedback', 'github'],
+    focusAreas: ['analytics_anomaly', 'onboarding', 'conversion', 'paywall', 'purchase', 'retention', 'revenue'],
+    sourcePriorities: ['analytics', 'revenuecat', 'asc_cli', 'feedback', 'github', 'sentry', 'glitchtip', 'coolify'],
     objective:
-      'Analyze every configured project for critical production blockers: Sentry/GlitchTip errors, Coolify failed deploys or unhealthy resources, crashes, onboarding or purchase drop-offs, zero-conversion days, missing buyers, very low users, and other silent business anomalies.',
+      'Detect non-Sentry product and payment anomalies that affect real users: broken login or account flows inferred from behavior, onboarding or purchase drop-offs, zero-conversion days, missing buyers, very low active users, retention cliffs, and revenue anomalies.',
     instructions:
-      'Compare against recent baselines across connected sources and code changes. If the finding is critical, produce the exact fix or next debugging step and prefer a GitHub issue or draft PR when GitHub write access is configured; otherwise hand off via OpenClaw chat. Avoid generic growth ideas.',
+      'Compare AnalyticsCLI, RevenueCat, ASC, feedback, memory/state, and recent code changes against recent baselines. Use Sentry/GlitchTip/Coolify only as corroborating context; do not repeat pure crash or deployment alerts that belong to the 90-minute healthcheck.',
   },
   {
     key: 'weekly',
@@ -117,9 +129,9 @@ const DEFAULT_CADENCE_PLAN = [
     focusAreas: ['conversion', 'paywall', 'onboarding', 'marketing', 'retention', 'stability'],
     sourcePriorities: ['analytics', 'revenuecat', 'asc_cli', 'feedback', 'sentry', 'coolify', 'github'],
     objective:
-      'Create an executive summary across all configured projects, connectors, recent releases, code changes, revenue, activation, retention, reviews, and production stability.',
+      'Create a deep app-by-app executive summary across all configured projects, connectors, recent releases, code changes, traffic, revenue, activation, conversion, retention, reviews, and production stability.',
     instructions:
-      'Pick one to three high-confidence improvements with evidence, expected KPI movement, likely code/store surfaces, owner-ready next steps, and a verification plan. Create GitHub issues or draft PR proposals only when the evidence is specific enough.',
+      'Be detailed. Group findings per app, explain why each recommendation should improve app usage, revenue, conversion, retention, or traffic, include expected KPI movement, likely code/store surfaces, owner-ready next steps, and verification plans. Generate charts when they clarify the evidence.',
   },
   {
     key: 'monthly',
@@ -131,19 +143,19 @@ const DEFAULT_CADENCE_PLAN = [
     objective:
       'Compare all configured projects month-over-month: MRR, trial conversion, churn, acquisition quality, store conversion, retention, review themes, feature usage, crash totals, and codebase changes.',
     instructions:
-      'Decide what should be built, changed, deleted, or instrumented next. Tie conclusions to connector data plus codebase evidence and explain why each recommendation should move revenue, activation, retention, stability, or acquisition quality.',
+      'Be very detailed and app-grouped. Decide what should be built, changed, deleted, priced differently, marketed differently, or instrumented next. Tie conclusions to connector data plus codebase evidence and explain why each recommendation should move revenue, conversion, retention, traffic, or acquisition quality. Generate charts when useful.',
   },
   {
     key: 'quarterly',
-    title: 'Quarterly positioning, pricing, and roadmap review',
+    title: '3-month positioning, pricing, and roadmap review',
     intervalDays: 91,
     criticalOnly: false,
     focusAreas: ['marketing', 'paywall', 'retention', 'conversion', 'onboarding'],
     sourcePriorities: ['analytics', 'revenuecat', 'asc_cli', 'feedback', 'github', 'sentry'],
     objective:
-      'Revisit positioning, pricing/packaging, onboarding architecture, roadmap assumptions, tracking quality, codebase constraints, and major funnel bets across every configured project.',
+      'Revisit positioning, pricing/packaging, onboarding architecture, roadmap assumptions, tracking quality, codebase constraints, and major funnel bets across every configured app.',
     instructions:
-      'Find structural constraints and durable opportunities. Tie recommendations to cohort behavior, monetization, reviews, channel quality, and shipped changes.',
+      'Find structural constraints and durable opportunities, not small UI tweaks. Group the analysis by app and tie recommendations to cohort behavior, monetization, reviews, channel quality, and shipped changes. Include concrete roadmap, pricing, conversion, and traffic recommendations.',
   },
   {
     key: 'six_months',
@@ -153,9 +165,9 @@ const DEFAULT_CADENCE_PLAN = [
     focusAreas: ['retention', 'conversion', 'paywall', 'marketing', 'general'],
     sourcePriorities: ['analytics', 'revenuecat', 'asc_cli', 'feedback', 'sentry'],
     objective:
-      'Audit connector coverage, SDK instrumentation, event taxonomy, data reliability, memory, growth loops, and whether product/code strategy still matches the best users across configured projects.',
+      'Audit connector coverage, SDK instrumentation, event taxonomy, data reliability, memory, growth loops, and whether product/code strategy still matches the best users across configured apps.',
     instructions:
-      'Prioritize measurement fixes and system changes that make future analysis more trustworthy. Identify stale events, missing attribution, weak identity, and misleading dashboards.',
+      'Group by app. Prioritize measurement fixes and system changes that make future analysis more trustworthy, then identify the highest-leverage app/revenue/conversion/traffic improvements. Identify stale events, missing attribution, weak identity, broken feedback loops, and misleading dashboards.',
   },
   {
     key: 'yearly',
@@ -3393,7 +3405,7 @@ function printCadencePlan(cadences) {
     ['Cadence', 'Every', 'Mode', 'Primary focus', 'What it decides'],
     cadences.map((cadence) => [
       cadence.key,
-      `${cadence.intervalDays}d`,
+      cadence.intervalMinutes ? `${cadence.intervalMinutes}m` : `${cadence.intervalDays}d`,
       cadence.criticalOnly ? 'critical only' : 'full review',
       Array.isArray(cadence.focusAreas) ? cadence.focusAreas.slice(0, 4).join(', ') : '',
       cadence.objective,
@@ -3428,6 +3440,31 @@ async function askToolUsage(rl) {
   });
 }
 
+async function askSchedulePreset(rl) {
+  return await askMenuChoice(rl, {
+    title: 'Schedule preset',
+    subtitle: 'Use Up/Down to move, Enter to continue, or press 1-3.',
+    defaultValue: 'recommended',
+    options: [
+      {
+        value: 'recommended',
+        label: 'Recommended',
+        detail: 'OpenClaw/Hermes wake every 30m; Sentry/GlitchTip/Coolify healthcheck runs every 90m; daily and larger reviews stay on cadence.',
+      },
+      {
+        value: 'quiet',
+        label: 'Quiet',
+        detail: 'OpenClaw/Hermes wake hourly; healthcheck runs every 6h; deep reviews unchanged.',
+      },
+      {
+        value: 'manual',
+        label: 'Manual',
+        detail: 'Enter runner, connector-health, cron, and cadence intervals yourself.',
+      },
+    ],
+  });
+}
+
 async function askCadencePlan(rl, existingCadences: any[] = []) {
   const existingByKey = new Map(
     (Array.isArray(existingCadences) ? existingCadences : [])
@@ -3447,7 +3484,7 @@ async function askCadencePlan(rl, existingCadences: any[] = []) {
     options: cadences.map((cadence) => ({
       value: cadence.key,
       label: cadence.title,
-      detail: `${cadence.intervalDays}d, ${cadence.criticalOnly ? 'critical only' : 'full review'} - ${cadence.objective}`,
+      detail: `${cadence.intervalMinutes ? `${cadence.intervalMinutes}m` : `${cadence.intervalDays}d`}, ${cadence.criticalOnly ? 'critical only' : 'full review'} - ${cadence.objective}`,
     })),
   });
   const selected = new Set(selectedCadences);
@@ -3465,6 +3502,16 @@ async function askCadencePlan(rl, existingCadences: any[] = []) {
   for (const cadence of cadences) {
     if (cadence.enabled === false) continue;
     process.stdout.write(`\n${cadence.title}\n`);
+    const intervalDefault = cadence.intervalMinutes ? `${cadence.intervalMinutes}m` : `${cadence.intervalDays || 1}d`;
+    const intervalRaw = await ask(rl, `${cadence.key} interval (for example 90m, 1d, 7d)`, intervalDefault);
+    const intervalMatch = String(intervalRaw || intervalDefault).trim().match(/^(\d+)\s*([md])$/i);
+    if (intervalMatch?.[2]?.toLowerCase() === 'm') {
+      cadence.intervalMinutes = Number.parseInt(intervalMatch[1], 10) || cadence.intervalMinutes || 90;
+      delete cadence.intervalDays;
+    } else if (intervalMatch?.[2]?.toLowerCase() === 'd') {
+      cadence.intervalDays = Number.parseInt(intervalMatch[1], 10) || cadence.intervalDays || 1;
+      delete cadence.intervalMinutes;
+    }
     cadence.objective = await ask(rl, `${cadence.key} objective`, cadence.objective);
     cadence.instructions = await ask(rl, `${cadence.key} instructions`, cadence.instructions);
     const focusAreas = await ask(rl, `${cadence.key} focus areas (comma-separated)`, cadence.focusAreas.join(','));
@@ -3576,7 +3623,8 @@ async function buildDefaultWizardConfig() {
       autoCreateWhenGitHubWriteAccess: true,
       disableAutoCreateGitHubArtifacts: false,
       mode: 'issue',
-      outputDestinations: ['openclaw_chat', 'github_issue', 'github_pull_request'],
+      outputDestinations: ['openclaw_chat', 'github_issue'],
+      productionErrorMode: 'issue',
       usageMode: 'production_autopilot',
       draftPullRequests: true,
       proposalBranchPrefix: 'openclaw/proposals',
@@ -3917,9 +3965,33 @@ async function askOutputConfig(rl, config) {
   });
   const wantsIssue = outputChoices.includes('issue');
   const wantsPullRequest = outputChoices.includes('pull_request');
-  const summaryOnly = !wantsIssue && !wantsPullRequest;
-  const mode = wantsPullRequest ? 'pull_request' : 'issue';
-  const autoCreate = wantsIssue || wantsPullRequest;
+  const productionErrorMode = await askMenuChoice(rl, {
+    title: 'Production error handling',
+    subtitle: 'What should happen when the 90-minute healthcheck confirms a production Sentry/GlitchTip/Coolify issue?',
+    defaultValue: config?.actions?.productionErrorMode || (wantsPullRequest ? 'pull_request' : wantsIssue ? 'issue' : 'alert'),
+    options: [
+      {
+        value: 'alert',
+        label: 'Alert only',
+        detail: 'Send the short alert/handoff; do not auto-create GitHub artifacts for production errors.',
+      },
+      {
+        value: 'issue',
+        label: 'GitHub issue',
+        detail: 'Create a GitHub issue with the production evidence and suggested investigation when access allows it.',
+      },
+      {
+        value: 'pull_request',
+        label: 'Draft PR',
+        detail: 'Create a draft PR proposal for implementation-ready production fixes when access allows it.',
+      },
+    ],
+  });
+  const effectiveWantsIssue = wantsIssue || productionErrorMode === 'issue';
+  const effectiveWantsPullRequest = wantsPullRequest || productionErrorMode === 'pull_request';
+  const summaryOnly = !effectiveWantsIssue && !effectiveWantsPullRequest;
+  const mode = effectiveWantsPullRequest ? 'pull_request' : 'issue';
+  const autoCreate = effectiveWantsIssue || effectiveWantsPullRequest;
 
   if (!summaryOnly) {
     process.stdout.write('GitHub repo scope is not pinned by the wizard; OpenClaw/Hermes will infer it from OPENCLAW_GITHUB_REPO, the local git remote, or runtime context when creating issues/PRs.\n');
@@ -3940,11 +4012,12 @@ async function askOutputConfig(rl, config) {
     mode,
     outputDestinations: [
       'openclaw_chat',
-      ...(wantsIssue ? ['github_issue'] : []),
-      ...(wantsPullRequest ? ['github_pull_request'] : []),
+      ...(effectiveWantsIssue ? ['github_issue'] : []),
+      ...(effectiveWantsPullRequest ? ['github_pull_request'] : []),
     ],
-    autoCreateIssues: wantsIssue,
-    autoCreatePullRequests: wantsPullRequest,
+    productionErrorMode,
+    autoCreateIssues: effectiveWantsIssue,
+    autoCreatePullRequests: effectiveWantsPullRequest,
     autoCreateWhenGitHubWriteAccess: config.actions?.autoCreateWhenGitHubWriteAccess !== false,
     disableAutoCreateGitHubArtifacts: config.actions?.disableAutoCreateGitHubArtifacts === true,
     draftPullRequests: true,
@@ -3963,8 +4036,8 @@ async function askOutputConfig(rl, config) {
       enabled: !summaryOnly,
       mode,
       modes: [
-        ...(wantsIssue ? ['issue'] : []),
-        ...(wantsPullRequest ? ['pull_request'] : []),
+        ...(effectiveWantsIssue ? ['issue'] : []),
+        ...(effectiveWantsPullRequest ? ['pull_request'] : []),
       ],
       autoCreate,
       draftPullRequests: true,
@@ -4090,18 +4163,26 @@ async function askIntervalConfig(rl, config) {
   const currentSchedule = config?.schedule || {};
   const currentAutomation = getAutomationConfig(config);
   const usageMode = await askToolUsage(rl);
-  const intervalMinutes = Number.parseInt(
-    await ask(rl, 'Growth runner wake-up interval in minutes', String(currentSchedule.intervalMinutes || DEFAULT_GROWTH_INTERVAL_MINUTES)),
-    10,
-  ) || DEFAULT_GROWTH_INTERVAL_MINUTES;
-  const connectorHealthCheckIntervalMinutes = Number.parseInt(
-    await ask(
-      rl,
-      'Connector health check interval in minutes',
-      String(currentSchedule.connectorHealthCheckIntervalMinutes || DEFAULT_CONNECTOR_HEALTH_INTERVAL_MINUTES),
-    ),
-    10,
-  ) || DEFAULT_CONNECTOR_HEALTH_INTERVAL_MINUTES;
+  const schedulePreset = await askSchedulePreset(rl);
+  const recommendedRunnerInterval = schedulePreset === 'quiet' ? 360 : 90;
+  const recommendedConnectorHealthInterval = schedulePreset === 'quiet' ? 360 : DEFAULT_CONNECTOR_HEALTH_INTERVAL_MINUTES;
+  const recommendedOpenClawCronSchedule = schedulePreset === 'quiet' ? '0 * * * *' : '*/30 * * * *';
+  const intervalMinutes = schedulePreset === 'manual'
+    ? Number.parseInt(
+        await ask(rl, 'Growth runner fallback loop interval in minutes', String(currentSchedule.intervalMinutes || recommendedRunnerInterval)),
+        10,
+      ) || recommendedRunnerInterval
+    : recommendedRunnerInterval;
+  const connectorHealthCheckIntervalMinutes = schedulePreset === 'manual'
+    ? Number.parseInt(
+        await ask(
+          rl,
+          'Connector credentials health check interval in minutes',
+          String(currentSchedule.connectorHealthCheckIntervalMinutes || recommendedConnectorHealthInterval),
+        ),
+        10,
+      ) || recommendedConnectorHealthInterval
+    : recommendedConnectorHealthInterval;
   const cadences = await askCadencePlan(rl, currentSchedule.cadences);
   const enableOpenClawCron = await askYesNo(
     rl,
@@ -4109,7 +4190,9 @@ async function askIntervalConfig(rl, config) {
     currentAutomation.openclawCron.enabled !== false,
   );
   const openclawCronSchedule = enableOpenClawCron
-    ? await ask(rl, 'OpenClaw cron expression for scheduler wakeups', currentAutomation.openclawCron.schedule || '*/30 * * * *')
+    ? schedulePreset === 'manual'
+      ? await ask(rl, 'OpenClaw cron expression for scheduler wakeups', currentAutomation.openclawCron.schedule || recommendedOpenClawCronSchedule)
+      : recommendedOpenClawCronSchedule
     : currentAutomation.openclawCron.schedule;
   const openclawCronTimezone = enableOpenClawCron
     ? await ask(rl, 'OpenClaw cron timezone', currentAutomation.openclawCron.timezone || process.env.TZ || 'UTC')
@@ -4120,7 +4203,9 @@ async function askIntervalConfig(rl, config) {
     currentAutomation.hermesCron.enabled !== false,
   );
   const hermesCronSchedule = enableHermesCron
-    ? await ask(rl, 'Hermes cron expression for scheduler wakeups', currentAutomation.hermesCron.schedule || openclawCronSchedule || '*/30 * * * *')
+    ? schedulePreset === 'manual'
+      ? await ask(rl, 'Hermes cron expression for scheduler wakeups', currentAutomation.hermesCron.schedule || openclawCronSchedule || recommendedOpenClawCronSchedule)
+      : openclawCronSchedule || recommendedOpenClawCronSchedule
     : currentAutomation.hermesCron.schedule;
 
   config.schedule = {

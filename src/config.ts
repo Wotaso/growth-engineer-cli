@@ -98,6 +98,7 @@ const cadenceSchema = z
   .object({
     key: z.string(),
     title: z.string().optional(),
+    intervalMinutes: z.number().int().min(1).optional(),
     intervalDays: z.number().min(1).optional(),
     criticalOnly: z.boolean().optional(),
     objective: z.string().optional(),
@@ -122,6 +123,22 @@ const strategySchema = z
   .object({
     proposalMode: z.enum(['mandatory', 'balanced', 'creative']).default('balanced'),
   })
+  .default({});
+
+const actionsSchema = z
+  .object({
+    mode: z.enum(['issue', 'pull_request']).default('issue'),
+    outputDestinations: z.array(z.string()).default(['openclaw_chat']),
+    productionErrorMode: z.enum(['alert', 'issue', 'pull_request']).default('alert'),
+    autoCreateIssues: z.boolean().default(false),
+    autoCreatePullRequests: z.boolean().default(false),
+    autoCreateWhenGitHubWriteAccess: z.boolean().default(true),
+    disableAutoCreateGitHubArtifacts: z.boolean().default(false),
+    draftPullRequests: z.boolean().default(true),
+    proposalBranchPrefix: z.string().default('openclaw/proposals'),
+    usageMode: z.string().default('production_autopilot'),
+  })
+  .passthrough()
   .default({});
 
 const secretRefSchema = z
@@ -206,6 +223,7 @@ const templateConfigSchema = z.object({
     .default({}),
   schedule: scheduleSchema,
   strategy: strategySchema,
+  actions: actionsSchema,
   deliveries: z
     .object({
       openclawChat: openclawChatDeliverySchema,
@@ -253,10 +271,15 @@ export type LegacyGrowthConfig = {
   strategy: z.infer<typeof strategySchema>;
   actions: {
     mode: 'issue' | 'pull_request';
+    outputDestinations?: string[];
+    productionErrorMode?: 'alert' | 'issue' | 'pull_request';
     autoCreateIssues: boolean;
     autoCreatePullRequests: boolean;
+    autoCreateWhenGitHubWriteAccess?: boolean;
+    disableAutoCreateGitHubArtifacts?: boolean;
     draftPullRequests: boolean;
     proposalBranchPrefix: string;
+    usageMode?: string;
   };
   charting: {
     enabled: boolean;
@@ -329,11 +352,13 @@ export const toLegacyGrowthConfig = (
     schedule: config.schedule,
     strategy: config.strategy,
     actions: {
-      mode: github.mode,
-      autoCreateIssues: github.enabled && github.mode === 'issue' && github.autoCreate,
-      autoCreatePullRequests: github.enabled && github.mode === 'pull_request' && github.autoCreate,
-      draftPullRequests: github.draftPullRequests,
-      proposalBranchPrefix: github.proposalBranchPrefix,
+      ...config.actions,
+      mode: config.actions.mode || github.mode,
+      autoCreateIssues: config.actions.autoCreateIssues || (github.enabled && github.mode === 'issue' && github.autoCreate),
+      autoCreatePullRequests:
+        config.actions.autoCreatePullRequests || (github.enabled && github.mode === 'pull_request' && github.autoCreate),
+      draftPullRequests: config.actions.draftPullRequests ?? github.draftPullRequests,
+      proposalBranchPrefix: config.actions.proposalBranchPrefix || github.proposalBranchPrefix,
     },
     charting: {
       enabled: config.charting.enabled,

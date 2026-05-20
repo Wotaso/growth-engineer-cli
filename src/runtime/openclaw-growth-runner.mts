@@ -27,16 +27,28 @@ const RUNTIME_DIR = path.dirname(fileURLToPath(import.meta.url));
 let schedulerProofPath = path.resolve(DEFAULT_SCHEDULER_PROOF_PATH);
 const DEFAULT_CADENCES = [
   {
+    key: 'healthcheck',
+    title: '90-minute production error healthcheck',
+    intervalMinutes: 90,
+    criticalOnly: true,
+    focusAreas: ['crash', 'deployment', 'availability'],
+    sourcePriorities: ['sentry', 'glitchtip', 'coolify', 'asc_cli'],
+    objective:
+      'Check Sentry/GlitchTip and Coolify for production errors, failed deploys, unhealthy resources, and availability blockers across every configured app.',
+    instructions:
+      'For Sentry/GlitchTip app errors, compare the issue release or app version with ASC production versions first. Ignore errors that only affect TestFlight, debug, staging, unreleased, or non-production app versions. Keep the social output short and action-oriented.',
+  },
+  {
     key: 'daily',
-    title: 'Daily Sentry and production guardrail',
+    title: 'Daily behavioral anomaly guardrail',
     intervalDays: 1,
     criticalOnly: true,
-    focusAreas: ['sentry_errors', 'crash', 'deployment', 'availability', 'onboarding', 'conversion', 'paywall', 'purchase'],
-    sourcePriorities: ['sentry', 'glitchtip', 'coolify', 'analytics', 'revenuecat', 'asc_cli', 'feedback', 'github'],
+    focusAreas: ['analytics_anomaly', 'onboarding', 'conversion', 'paywall', 'purchase', 'retention', 'revenue'],
+    sourcePriorities: ['analytics', 'revenuecat', 'asc_cli', 'feedback', 'github', 'sentry', 'glitchtip', 'coolify'],
     objective:
-      'Analyze every configured project for critical production blockers: Sentry/GlitchTip errors, Coolify failed deploys or unhealthy resources, crashes, onboarding or purchase drop-offs, zero-conversion days, missing buyers, very low users, and other silent business anomalies.',
+      'Detect non-Sentry product and payment anomalies that affect real users: broken login or account flows inferred from behavior, onboarding or purchase drop-offs, zero-conversion days, missing buyers, very low active users, retention cliffs, and revenue anomalies.',
     instructions:
-      'Compare against recent baselines across Sentry/GlitchTip, Coolify, AnalyticsCLI, RevenueCat, ASC, feedback, release metadata, memory/state, and recent code changes. If the finding is critical, produce the exact fix or next debugging step and prefer a GitHub issue or draft PR when GitHub write access is configured; otherwise hand off via OpenClaw chat. Do not invent generic growth ideas.',
+      'Compare AnalyticsCLI, RevenueCat, ASC, feedback, memory/state, and recent code changes against recent baselines. Use Sentry/GlitchTip/Coolify only as corroborating context; do not repeat pure crash or deployment alerts that belong to the 90-minute healthcheck.',
   },
   {
     key: 'weekly',
@@ -46,9 +58,9 @@ const DEFAULT_CADENCES = [
     focusAreas: ['conversion', 'paywall', 'onboarding', 'marketing', 'retention', 'stability'],
     sourcePriorities: ['analytics', 'revenuecat', 'asc_cli', 'feedback', 'sentry', 'coolify', 'github'],
     objective:
-      'Create an executive summary across all configured projects, connectors, recent releases, code changes, revenue, activation, retention, reviews, and production stability.',
+      'Create a deep app-by-app executive summary across all configured projects, connectors, recent releases, code changes, traffic, revenue, activation, conversion, retention, reviews, and production stability.',
     instructions:
-      'Choose one to three high-confidence improvements with evidence, expected KPI movement, likely code/store surfaces, owner-ready next steps, and verification plan. Create GitHub issues or draft PR proposals only when the evidence is specific enough. Kill or adjust experiments without signal.',
+      'Be detailed. Group findings per app, explain why each recommendation should improve app usage, revenue, conversion, retention, or traffic, include expected KPI movement, likely code/store surfaces, owner-ready next steps, and verification plans. Generate charts when they clarify the evidence.',
   },
   {
     key: 'monthly',
@@ -60,19 +72,19 @@ const DEFAULT_CADENCES = [
     objective:
       'Compare all configured projects month-over-month: MRR, trial conversion, churn, acquisition channel quality, store/listing conversion, retention, review themes, feature usage, crash totals, and codebase changes.',
     instructions:
-      'Decide what should be built, changed, deleted, or instrumented next. Tie conclusions to connector data plus codebase evidence and explain why each recommendation should move revenue, activation, retention, stability, or acquisition quality.',
+      'Be very detailed and app-grouped. Decide what should be built, changed, deleted, priced differently, marketed differently, or instrumented next. Tie conclusions to connector data plus codebase evidence and explain why each recommendation should move revenue, conversion, retention, traffic, or acquisition quality. Generate charts when useful.',
   },
   {
     key: 'quarterly',
-    title: 'Quarterly positioning, pricing, and roadmap review',
+    title: '3-month positioning, pricing, and roadmap review',
     intervalDays: 91,
     criticalOnly: false,
     focusAreas: ['marketing', 'paywall', 'retention', 'conversion', 'onboarding'],
     sourcePriorities: ['analytics', 'revenuecat', 'asc_cli', 'feedback', 'github', 'sentry'],
     objective:
-      'Revisit positioning, pricing/packaging, onboarding architecture, roadmap assumptions, tracking quality, codebase constraints, and major funnel bets across every configured project.',
+      'Revisit positioning, pricing/packaging, onboarding architecture, roadmap assumptions, tracking quality, codebase constraints, and major funnel bets across every configured app.',
     instructions:
-      'Find structural constraints and durable opportunities, not small UI tweaks. Tie recommendations to cohort behavior, monetization, reviews, channel quality, and shipped changes.',
+      'Find structural constraints and durable opportunities, not small UI tweaks. Group the analysis by app and tie recommendations to cohort behavior, monetization, reviews, channel quality, and shipped changes. Include concrete roadmap, pricing, conversion, and traffic recommendations.',
   },
   {
     key: 'six_months',
@@ -84,7 +96,7 @@ const DEFAULT_CADENCES = [
     objective:
       'Audit connector coverage, SDK instrumentation, event taxonomy, data reliability, data memory, growth loops, and whether product/code strategy still matches the best users across configured projects.',
     instructions:
-      'Prioritize measurement fixes and system changes that make future analysis more trustworthy. Identify stale events, missing attribution, weak identity, broken feedback loops, and misleading dashboards.',
+      'Group by app. Prioritize measurement fixes and system changes that make future analysis more trustworthy, then identify the highest-leverage app/revenue/conversion/traffic improvements. Identify stale events, missing attribution, weak identity, broken feedback loops, and misleading dashboards.',
   },
   {
     key: 'yearly',
@@ -599,6 +611,13 @@ function getCadenceDefinitions(config) {
 
 function cadenceIsDue(cadence, state) {
   const lastRanAt = state?.cadences?.[cadence.key]?.lastRanAt;
+  const intervalMinutes = Number(cadence.intervalMinutes || 0);
+  if (intervalMinutes > 0) {
+    if (!lastRanAt) return true;
+    const last = Date.parse(String(lastRanAt));
+    if (!Number.isFinite(last)) return true;
+    return Date.now() - last >= Math.max(1, intervalMinutes) * 60 * 1000;
+  }
   const intervalDays = Number(cadence.intervalDays || 1);
   if (!lastRanAt) return true;
   const last = Date.parse(String(lastRanAt));
@@ -607,10 +626,7 @@ function cadenceIsDue(cadence, state) {
 }
 
 function getDueCadences(config, state) {
-  const due = getCadenceDefinitions(config).filter((cadence) => cadenceIsDue(cadence, state));
-  if (due.length > 0) return due;
-  const daily = getCadenceDefinitions(config).find((cadence) => cadence.key === 'daily');
-  return daily ? [daily] : [];
+  return getCadenceDefinitions(config).filter((cadence) => cadenceIsDue(cadence, state));
 }
 
 function markCadencesRan(state, cadences, ranAt) {
@@ -1122,6 +1138,34 @@ function buildGrowthRunSummaryMessage({ issuesPayload, activeCadences, sourceFil
     ? activeCadences.map((cadence) => cadence.title || cadence.key).join(', ')
     : 'ad-hoc growth pass';
   const sourceNames = Object.keys(sourceFiles || {}).sort().join(', ') || 'none';
+  const issues = Array.isArray(issuesPayload?.issues) ? issuesPayload.issues : [];
+
+  if (isShortOperationalCadence(activeCadences)) {
+    const heading = activeCadences.some((cadence) => String(cadence?.key) === 'healthcheck')
+      ? 'OpenClaw production healthcheck'
+      : 'OpenClaw daily guardrail';
+    const lines = [
+      `${heading}: ${issueCount > 0 ? `${issueCount} finding(s)` : 'no new finding'}`,
+      `Sources: ${sourceNames}`,
+    ];
+    if (issueCount > 0) {
+      lines.push('Top:');
+      for (const issue of issues.slice(0, 4)) {
+        const evidence = firstEvidenceLines(issue, 1)[0];
+        lines.push(`- ${issue.title}${evidence ? ` - ${evidence}` : ''}`);
+      }
+      lines.push(
+        createdGitHubArtifact
+          ? 'Action: GitHub artifact creation was attempted.'
+          : 'Action: alert/handoff only; GitHub auto-create is disabled or unavailable.',
+      );
+    }
+    if (charts.length > 0) {
+      lines.push(`Charts: ${charts.length}`);
+    }
+    return `${lines.join('\n')}\n`;
+  }
+
   const lines = [
     `OpenClaw Growth run finished (${new Date().toISOString()}).`,
     `Cadence: ${cadenceNames}`,
@@ -1140,16 +1184,28 @@ function buildGrowthRunSummaryMessage({ issuesPayload, activeCadences, sourceFil
       lines.push(`- ${chart.caption}: ${chart.filePath}`);
     }
   }
-  const issues = Array.isArray(issuesPayload?.issues) ? issuesPayload.issues.slice(0, 3) : [];
-  if (issues.length > 0) {
+  const topIssues = issues.slice(0, isDeepAnalysisCadence(activeCadences) ? 5 : 3);
+  if (topIssues.length > 0) {
     lines.push('');
-    lines.push('Top findings:');
-    for (const issue of issues) {
+    lines.push(isDeepAnalysisCadence(activeCadences) ? 'App-by-app findings and next steps:' : 'Top findings:');
+    for (const issue of topIssues) {
       lines.push(`- ${issue.title} (${issue.priority || 'medium'}, ${issue.area || 'general'})`);
+      if (isDeepAnalysisCadence(activeCadences)) {
+        for (const evidence of firstEvidenceLines(issue, 2)) {
+          lines.push(`  Evidence: ${evidence}`);
+        }
+        if (issue.expected_impact) {
+          lines.push(`  Impact: ${issue.expected_impact}`);
+        }
+      }
     }
   }
   lines.push('');
-  lines.push('No secrets were included. Use the generated issue drafts or OpenClaw chat handoff for details.');
+  lines.push(
+    isDeepAnalysisCadence(activeCadences)
+      ? 'No secrets were included. Full details are in the generated issue drafts, charts, and OpenClaw chat handoff.'
+      : 'No secrets were included.',
+  );
   return `${lines.join('\n')}\n`;
 }
 
@@ -1469,6 +1525,32 @@ function buildIssueFingerprint(issuesPayload) {
   return sha256(titles.join('\n'));
 }
 
+function isShortOperationalCadence(cadences) {
+  if (!Array.isArray(cadences) || cadences.length === 0) return false;
+  return cadences.every((cadence) => {
+    const key = String(cadence?.key || '').toLowerCase();
+    return key === 'healthcheck' || key === 'daily' || cadence?.criticalOnly === true;
+  });
+}
+
+function isDeepAnalysisCadence(cadences) {
+  if (!Array.isArray(cadences)) return false;
+  return cadences.some((cadence) =>
+    ['weekly', 'monthly', 'quarterly', 'six_months', 'yearly'].includes(String(cadence?.key || '').toLowerCase()),
+  );
+}
+
+function firstEvidenceLines(issue, maxLines = 2) {
+  const body = String(issue?.body || '');
+  const evidenceMatch = body.match(/## Evidence\n([\s\S]*?)(?:\n## |\n?$)/);
+  if (!evidenceMatch) return [];
+  return evidenceMatch[1]
+    .split('\n')
+    .map((line) => line.replace(/^-\s*/, '').trim())
+    .filter(Boolean)
+    .slice(0, maxLines);
+}
+
 async function runAnalyzer({
   config,
   runtimeDir,
@@ -1558,8 +1640,11 @@ async function runAnalyzer({
   };
 }
 
-async function maybeGenerateCharts({ config, payloads, runtimeDir }) {
+async function maybeGenerateCharts({ config, payloads, runtimeDir, activeCadences }) {
   if (!config.charting?.enabled) {
+    return null;
+  }
+  if (!isDeepAnalysisCadence(activeCadences)) {
     return null;
   }
   const analyticsPayload = payloads.analytics;
@@ -1828,10 +1913,9 @@ async function runOnce(configPath, statePath) {
     sourceFailures,
   });
   const currentHashes = computeSourceHashes(payloads);
-  const changed = hasSourceChanges(stateAfterSourceCollection.sourceHashes, currentHashes);
 
-  if (activeCadences.length === 0 && !changed && config.schedule?.skipIfNoDataChange !== false) {
-    process.stdout.write(`[${new Date().toISOString()}] No data changes. Skip run.\n`);
+  if (activeCadences.length === 0) {
+    process.stdout.write(`[${new Date().toISOString()}] No scheduled cadence due. Skip run.\n`);
     const completedAt = new Date().toISOString();
     await fs.mkdir(path.dirname(statePath), { recursive: true });
     await fs.writeFile(
@@ -1843,7 +1927,7 @@ async function runOnce(configPath, statePath) {
           sourceHashes: currentHashes,
           sourceCursors,
           lastRunAt: completedAt,
-          skippedReason: 'no_data_change',
+          skippedReason: 'cadence_not_due',
         },
         null,
         2,
@@ -1854,8 +1938,8 @@ async function runOnce(configPath, statePath) {
       configPath,
       statePath,
       completedAt,
-      skippedReason: 'no_data_change',
-      activeCadences: activeCadences.map((cadence) => cadence.key),
+      skippedReason: 'cadence_not_due',
+      socialOutput: 'HEARTBEAT_OK',
     });
     return;
   }
@@ -1883,6 +1967,7 @@ async function runOnce(configPath, statePath) {
     config,
     payloads,
     runtimeDir,
+    activeCadences,
   });
   const dryRun = await runAnalyzer({
     config,

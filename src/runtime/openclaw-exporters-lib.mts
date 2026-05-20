@@ -349,6 +349,42 @@ function collectStatusEntries(payload) {
   return entries;
 }
 
+function normalizeVersionToken(value) {
+  const normalized = String(value || '').trim();
+  if (!normalized) return '';
+  const match = normalized.match(/\b\d+(?:\.\d+){1,3}(?:\+\d+)?\b/);
+  return match ? match[0] : '';
+}
+
+function collectAscProductionVersions(payload) {
+  const candidates = [];
+  walk(payload, (value, pathParts, key) => {
+    if (typeof value !== 'string' && typeof value !== 'number') return;
+    const normalizedKey = String(key || '').toLowerCase();
+    if (!/(version|string|build|release)/.test(normalizedKey)) return;
+    const version = normalizeVersionToken(value);
+    if (!version) return;
+    const pathText = pathParts.join('.').toLowerCase();
+    const parentPath = pathParts.slice(0, -1).join('.').toLowerCase();
+    const context = String(JSON.stringify(resolvePathPayload(payload, pathParts.slice(0, -1))) || '').toLowerCase();
+    if (
+      /(ready_for_sale|readyforsale|approved|active|available|current|live|production)/.test(`${pathText} ${parentPath} ${context}`)
+    ) {
+      candidates.push(version);
+    }
+  });
+  return [...new Set(candidates)].sort();
+}
+
+function resolvePathPayload(payload, pathParts) {
+  let current = payload;
+  for (const part of pathParts) {
+    if (!current || typeof current !== 'object') return null;
+    current = current[part];
+  }
+  return current;
+}
+
 function classifyAscStatus(value) {
   const normalized = String(value || '')
     .trim()
@@ -643,6 +679,7 @@ function formatPercent(value) {
 export function buildAscSummary(input) {
   const appId = String(input?.appId || 'ASC_APP_ID').trim() || 'ASC_APP_ID';
   const statusEntries = collectStatusEntries(input?.statusPayload);
+  const productionVersions = collectAscProductionVersions(input?.statusPayload);
   const blockingStatuses = statusEntries.filter(
     (entry) => classifyAscStatus(entry.value) === 'blocking',
   );
@@ -960,6 +997,7 @@ export function buildAscSummary(input) {
       analyticsAvailability,
       analyticsWarnings,
       batchReports,
+      productionVersions,
       analytics: {
         units: unitsMetric
           ? {
@@ -1197,6 +1235,7 @@ function normalizeSentryPriority(issue) {
 }
 
 function normalizeSentryEvidence(issue, environment) {
+  const releaseVersions = extractSentryReleaseVersions(issue);
   return [
     issue?.shortId ? `Sentry issue: ${issue.shortId}` : issue?.id ? `Sentry issue id: ${issue.id}` : null,
     issue?.permalink ? `Permalink: ${issue.permalink}` : null,
@@ -1205,10 +1244,34 @@ function normalizeSentryEvidence(issue, environment) {
     issue?.firstSeen ? `First seen: ${issue.firstSeen}` : null,
     issue?.lastSeen ? `Last seen: ${issue.lastSeen}` : null,
     environment ? `Environment: ${environment}` : null,
+    releaseVersions.length > 0 ? `Release/app version: ${releaseVersions.join(', ')}` : null,
     normalizeSentryIssueCount(issue) ? `Events: ${normalizeSentryIssueCount(issue)}` : null,
     normalizeSentryUserCount(issue) ? `Affected users: ${normalizeSentryUserCount(issue)}` : null,
     issue?.culprit ? `Culprit: ${issue.culprit}` : null,
   ].filter(Boolean);
+}
+
+function extractSentryReleaseVersions(issue) {
+  const values = [
+    issue?.release,
+    issue?.firstRelease?.version,
+    issue?.firstRelease?.shortVersion,
+    issue?.lastRelease?.version,
+    issue?.lastRelease?.shortVersion,
+    issue?.metadata?.release,
+    issue?.metadata?.version,
+    issue?.metadata?.appVersion,
+    issue?.metadata?.['app.version'],
+  ];
+  if (Array.isArray(issue?.tags)) {
+    for (const tag of issue.tags) {
+      const key = String(tag?.key || tag?.name || '').toLowerCase();
+      if (/(release|version|app\.version|dist|build)/.test(key)) {
+        values.push(tag?.value);
+      }
+    }
+  }
+  return [...new Set(values.map(normalizeVersionToken).filter(Boolean))].sort();
 }
 
 function buildCombinedSentrySummary(input) {
@@ -1290,35 +1353,40 @@ export function buildSentrySummary(input) {
   const maxSignals = Math.max(1, Number(input?.maxSignals) || 5);
   const normalizedIssues = issues
     .filter((issue) => issue && typeof issue === 'object')
-    .map((issue, index) => ({
-      id: String(issue.id || issue.shortId || `sentry_${index + 1}`),
-      title: normalizeSentryIssueTitle(issue),
-      priority: normalizeSentryPriority(issue),
-      impact:
-        normalizeSentryUserCount(issue) > 0
-          ? `${normalizeSentryUserCount(issue)} affected users in ${last}`
-          : `Production stability issue observed in ${last}`,
-      events: normalizeSentryIssueCount(issue),
-      users: normalizeSentryUserCount(issue),
-      area: 'crash',
-      metric: 'sentry_unresolved_issues',
-      stack_keywords: [
-        issue.level,
-        issue.type,
-        issue.platform,
-        issue.metadata?.type,
-        issue.culprit,
-      ]
-        .filter(Boolean)
-        .map((value) => String(value).slice(0, 80)),
-      evidence: normalizeSentryEvidence(issue, environment),
-      suggested_actions: [
-        'Map this Sentry issue to the current production release and affected user journey',
-        'Check whether the crash intersects onboarding, paywall, purchase, or first value events',
-        'Fix or mitigate the highest-user-impact issue before running new growth experiments that send more traffic into the broken path',
-      ],
-      confidence: 'high',
-    }))
+    .map((issue, index) => {
+      const releaseVersions = extractSentryReleaseVersions(issue);
+      return {
+        id: String(issue.id || issue.shortId || `sentry_${index + 1}`),
+        title: normalizeSentryIssueTitle(issue),
+        priority: normalizeSentryPriority(issue),
+        impact:
+          normalizeSentryUserCount(issue) > 0
+            ? `${normalizeSentryUserCount(issue)} affected users in ${last}`
+            : `Production stability issue observed in ${last}`,
+        events: normalizeSentryIssueCount(issue),
+        users: normalizeSentryUserCount(issue),
+        releaseVersions,
+        area: 'crash',
+        metric: 'sentry_unresolved_issues',
+        stack_keywords: [
+          issue.level,
+          issue.type,
+          issue.platform,
+          issue.metadata?.type,
+          issue.culprit,
+          ...releaseVersions,
+        ]
+          .filter(Boolean)
+          .map((value) => String(value).slice(0, 80)),
+        evidence: normalizeSentryEvidence(issue, environment),
+        suggested_actions: [
+          'Map this Sentry issue to the current production release and affected user journey',
+          'Check whether the crash intersects onboarding, paywall, purchase, or first value events',
+          'Fix or mitigate the highest-user-impact issue before running new growth experiments that send more traffic into the broken path',
+        ],
+        confidence: 'high',
+      };
+    })
     .sort((a, b) => {
       const priorityDelta = priorityRank(b.priority) - priorityRank(a.priority);
       if (priorityDelta !== 0) return priorityDelta;
@@ -1339,6 +1407,7 @@ export function buildSentrySummary(input) {
       priority: issue.priority,
       metric: issue.metric,
       current_value: issue.events,
+      releaseVersions: issue.releaseVersions,
       evidence: issue.evidence,
       suggested_actions: issue.suggested_actions,
       keywords: issue.stack_keywords,

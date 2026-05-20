@@ -282,6 +282,8 @@ function normalizeSignals(payload, source, service = source) {
         currentValue: coerceNumber(signal.current_value ?? signal.currentValue),
         baselineValue: coerceNumber(signal.baseline_value ?? signal.baselineValue),
         confidence: signal.confidence ? String(signal.confidence) : null,
+        releaseVersions: toStringArray(signal.releaseVersions || signal.release_versions),
+        app: signal.app ? String(signal.app) : payload.project ? String(payload.project) : null,
       });
     }
   }
@@ -307,6 +309,8 @@ function normalizeSignals(payload, source, service = source) {
         currentValue: null,
         baselineValue: null,
         confidence: issue.confidence ? String(issue.confidence) : null,
+        releaseVersions: toStringArray(issue.releaseVersions || issue.release_versions),
+        app: issue.app ? String(issue.app) : payload.project ? String(payload.project) : null,
       });
     }
   }
@@ -351,6 +355,8 @@ function normalizeSignals(payload, source, service = source) {
         currentValue: coerceNumber(item.count ?? item.current_value ?? item.currentValue),
         baselineValue: coerceNumber(item.baseline_count ?? item.baseline_value ?? item.baselineValue),
         confidence: item.confidence ? String(item.confidence) : null,
+        releaseVersions: toStringArray(item.releaseVersions || item.release_versions),
+        app: item.app ? String(item.app) : payload.project ? String(payload.project) : null,
       });
     }
   }
@@ -587,6 +593,9 @@ function buildIssueDraft(signal, matchedFiles, titlePrefix, activeCadences: any[
       : DEFAULT_PROPOSALS[signal.area] || DEFAULT_PROPOSALS.general;
 
   const evidence = [...signal.evidence];
+  if (signal.app) {
+    evidence.unshift(`App: ${signal.app}`);
+  }
   if (signal.metric && signal.currentValue !== null && signal.baselineValue !== null) {
     evidence.push(
       `Metric \`${signal.metric}\`: current=${signal.currentValue}, baseline=${signal.baselineValue}`,
@@ -813,6 +822,117 @@ function applyCadencePlan(signals, cadences) {
   const allCriticalOnly = cadences.every((cadence) => cadence.criticalOnly);
   const filtered = allCriticalOnly ? signals.filter(isCriticalSignal) : signals;
   return [...filtered].sort((a, b) => cadenceSignalScore(b, cadences) - cadenceSignalScore(a, cadences));
+}
+
+function normalizeVersionToken(value) {
+  const normalized = String(value || '').trim();
+  if (!normalized) return '';
+  const match = normalized.match(/\b\d+(?:\.\d+){1,3}(?:\+\d+)?\b/);
+  return match ? match[0] : '';
+}
+
+function versionMatchesProduction(signalVersion, productionVersion) {
+  const signal = normalizeVersionToken(signalVersion);
+  const production = normalizeVersionToken(productionVersion);
+  if (!signal || !production) return false;
+  return signal === production || signal.startsWith(`${production}+`) || production.startsWith(`${signal}+`);
+}
+
+function collectAscProductionVersionsFromPayload(payload) {
+  const versions = [];
+  const visit = (value) => {
+    if (!value || typeof value !== 'object') return;
+    if (Array.isArray(value)) {
+      for (const item of value) visit(item);
+      return;
+    }
+    if (Array.isArray(value.meta?.productionVersions)) {
+      versions.push(...value.meta.productionVersions);
+    }
+    if (Array.isArray(value.productionVersions)) {
+      versions.push(...value.productionVersions);
+    }
+    const crashBreakdown = value.meta?.analytics?.crashBreakdown;
+    if (Array.isArray(crashBreakdown)) {
+      versions.push(...crashBreakdown.map((entry) => entry?.label));
+    }
+    for (const child of Object.values(value)) visit(child);
+  };
+  visit(payload);
+  return [...new Set(versions.map(normalizeVersionToken).filter(Boolean))].sort();
+}
+
+function extractSignalReleaseVersions(signal) {
+  const values = [...toStringArray(signal.releaseVersions || signal.release_versions)];
+  for (const evidence of signal.evidence || []) {
+    if (/release|version|build/i.test(evidence)) {
+      values.push(...String(evidence).match(/\b\d+(?:\.\d+){1,3}(?:\+\d+)?\b/g) || []);
+    }
+  }
+  for (const keyword of signal.keywords || []) {
+    values.push(normalizeVersionToken(keyword));
+  }
+  return [...new Set(values.map(normalizeVersionToken).filter(Boolean))].sort();
+}
+
+function shouldVerifyProductionRelease(cadences) {
+  return (cadences || []).some((cadence) => {
+    const text = `${cadence.key || ''} ${cadence.title || ''} ${cadence.objective || ''} ${cadence.instructions || ''}`.toLowerCase();
+    return text.includes('production') && (text.includes('sentry') || text.includes('glitchtip'));
+  });
+}
+
+function filterNonProductionCrashSignals(signals, ascPayloads, cadences) {
+  if (!shouldVerifyProductionRelease(cadences)) {
+    return { signals, ignored: [] };
+  }
+  const productionVersions = collectAscProductionVersionsFromPayload(ascPayloads);
+  if (productionVersions.length === 0) {
+    return { signals, ignored: [] };
+  }
+  const kept = [];
+  const ignored = [];
+  for (const signal of signals) {
+    const source = String(signal.source || '').toLowerCase();
+    const isCrashProvider = ['sentry', 'glitchtip'].some((provider) => source.includes(provider));
+    if (!isCrashProvider || signal.area !== 'crash') {
+      kept.push(signal);
+      continue;
+    }
+    const releaseVersions = extractSignalReleaseVersions(signal);
+    if (releaseVersions.length === 0) {
+      kept.push({
+        ...signal,
+        evidence: [
+          ...signal.evidence,
+          `ASC production version check: no release/app version was present on the crash issue; production versions known: ${productionVersions.join(', ')}`,
+        ],
+      });
+      continue;
+    }
+    const productionMatch = releaseVersions.some((releaseVersion) =>
+      productionVersions.some((productionVersion) => versionMatchesProduction(releaseVersion, productionVersion)),
+    );
+    if (productionMatch) {
+      kept.push({
+        ...signal,
+        evidence: [
+          ...signal.evidence,
+          `ASC production version check passed: ${releaseVersions.join(', ')} intersects ${productionVersions.join(', ')}`,
+        ],
+      });
+    } else {
+      ignored.push({
+        id: signal.id,
+        title: signal.title,
+        source: signal.source,
+        releaseVersions,
+        productionVersions,
+        reason: 'Sentry/GlitchTip issue release is not an ASC production version',
+      });
+    }
+  }
+  return { signals: kept, ignored };
 }
 
 function indexChartsBySignal(manifest, manifestFilePath) {
@@ -1195,7 +1315,11 @@ async function main() {
       ...extraSources.flatMap((source) => normalizeSignals(source.payload, source.key, source.service)),
     ]),
   );
-  const signals = applyCadencePlan(rankedSignals, activeCadences).slice(0, args.maxIssues);
+  const ascPayloads = extraSources
+    .filter((source) => source.service === 'asc-cli' || source.service === 'asc' || source.key === 'asc_cli')
+    .map((source) => source.payload);
+  const productionFilter = filterNonProductionCrashSignals(rankedSignals, ascPayloads, activeCadences);
+  const signals = applyCadencePlan(productionFilter.signals, activeCadences).slice(0, args.maxIssues);
 
   if (signals.length === 0) {
     const allCriticalOnly = activeCadences.length > 0 && activeCadences.every((cadence) => cadence.criticalOnly);
@@ -1207,6 +1331,7 @@ async function main() {
         issue_count: 0,
         issues: [],
         summary: 'No critical production or business-anomaly signals matched the active cadence.',
+        ignored_signals: productionFilter.ignored,
       };
       await ensureParentDir(outputPath);
       await fs.writeFile(outputPath, JSON.stringify(output, null, 2), 'utf8');
@@ -1247,6 +1372,7 @@ async function main() {
     run_cadences: activeCadences,
     issue_count: issueDrafts.length,
     issues: issueDrafts,
+    ignored_signals: productionFilter.ignored,
   };
   await ensureParentDir(outputPath);
   await fs.writeFile(outputPath, JSON.stringify(output, null, 2), 'utf8');

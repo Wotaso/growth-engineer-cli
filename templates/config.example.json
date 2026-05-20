@@ -72,20 +72,30 @@
     ]
   },
   "schedule": {
-    "intervalMinutes": 1440,
+    "intervalMinutes": 90,
     "connectorHealthCheckIntervalMinutes": 360,
     "skipIfNoDataChange": true,
     "skipIfIssueSetUnchanged": true,
     "cadences": [
       {
+        "key": "healthcheck",
+        "title": "90-minute production error healthcheck",
+        "intervalMinutes": 90,
+        "criticalOnly": true,
+        "focusAreas": ["crash", "deployment", "availability"],
+        "sourcePriorities": ["sentry", "glitchtip", "coolify", "asc_cli"],
+        "objective": "Check Sentry/GlitchTip and Coolify for production errors, failed deploys, unhealthy resources, and availability blockers across every configured app.",
+        "instructions": "For Sentry/GlitchTip app errors, compare the issue release or app version with ASC production versions first. Ignore errors that only affect TestFlight, debug, staging, unreleased, or non-production app versions. Keep the social output short and action-oriented."
+      },
+      {
         "key": "daily",
-        "title": "Daily Sentry and production guardrail",
+        "title": "Daily behavioral anomaly guardrail",
         "intervalDays": 1,
         "criticalOnly": true,
-        "focusAreas": ["sentry_errors", "crash", "deployment", "availability", "onboarding", "conversion", "paywall", "purchase"],
-        "sourcePriorities": ["sentry", "glitchtip", "coolify", "analytics", "revenuecat", "asc_cli", "feedback", "github"],
-        "objective": "Analyze every configured project for critical production blockers: Sentry/GlitchTip errors, Coolify failed deploys or unhealthy resources, crashes, onboarding or purchase drop-offs, zero-conversion days, missing buyers, very low users, and other silent business anomalies.",
-        "instructions": "Compare against recent baselines across connected sources and code changes. If the finding is critical, produce the exact fix or next debugging step and prefer a GitHub issue or draft PR when GitHub write access is configured; otherwise hand off via OpenClaw chat. Avoid generic growth ideas."
+        "focusAreas": ["analytics_anomaly", "onboarding", "conversion", "paywall", "purchase", "retention", "revenue"],
+        "sourcePriorities": ["analytics", "revenuecat", "asc_cli", "feedback", "github", "sentry", "glitchtip", "coolify"],
+        "objective": "Detect non-Sentry product and payment anomalies that affect real users: broken login or account flows inferred from behavior, onboarding or purchase drop-offs, zero-conversion days, missing buyers, very low active users, retention cliffs, and revenue anomalies.",
+        "instructions": "Compare AnalyticsCLI, RevenueCat, ASC, feedback, memory/state, and recent code changes against recent baselines. Use Sentry/GlitchTip/Coolify only as corroborating context; do not repeat pure crash or deployment alerts that belong to the 90-minute healthcheck."
       },
       {
         "key": "weekly",
@@ -94,8 +104,8 @@
         "criticalOnly": false,
         "focusAreas": ["conversion", "paywall", "onboarding", "marketing", "retention", "stability"],
         "sourcePriorities": ["analytics", "revenuecat", "asc_cli", "feedback", "sentry", "coolify", "github"],
-        "objective": "Create an executive summary across all configured projects, connectors, recent releases, code changes, revenue, activation, retention, reviews, and production stability.",
-        "instructions": "Pick one to three high-confidence improvements with evidence, expected KPI movement, likely code/store surfaces, owner-ready next steps, and a verification plan. Create GitHub issues or draft PR proposals only when the evidence is specific enough."
+        "objective": "Create a deep app-by-app executive summary across all configured projects, connectors, recent releases, code changes, traffic, revenue, activation, conversion, retention, reviews, and production stability.",
+        "instructions": "Be detailed. Group findings per app, explain why each recommendation should improve app usage, revenue, conversion, retention, or traffic, include expected KPI movement, likely code/store surfaces, owner-ready next steps, and verification plans. Generate charts when they clarify the evidence."
       },
       {
         "key": "monthly",
@@ -105,17 +115,17 @@
         "focusAreas": ["conversion", "paywall", "retention", "marketing", "onboarding", "codebase"],
         "sourcePriorities": ["analytics", "revenuecat", "asc_cli", "feedback", "sentry", "coolify", "github"],
         "objective": "Compare all configured projects month-over-month: MRR, trial conversion, churn, acquisition quality, store conversion, retention, review themes, feature usage, crash totals, and codebase changes.",
-        "instructions": "Decide what should be built, changed, deleted, or instrumented next. Tie conclusions to connector data plus codebase evidence and explain why each recommendation should move revenue, activation, retention, stability, or acquisition quality."
+        "instructions": "Be very detailed and app-grouped. Decide what should be built, changed, deleted, priced differently, marketed differently, or instrumented next. Tie conclusions to connector data plus codebase evidence and explain why each recommendation should move revenue, conversion, retention, traffic, or acquisition quality. Generate charts when useful."
       },
       {
         "key": "quarterly",
-        "title": "Quarterly positioning, pricing, and roadmap review",
+        "title": "3-month positioning, pricing, and roadmap review",
         "intervalDays": 91,
         "criticalOnly": false,
         "focusAreas": ["marketing", "paywall", "retention", "conversion", "onboarding"],
         "sourcePriorities": ["analytics", "revenuecat", "asc_cli", "feedback", "github", "sentry"],
-        "objective": "Revisit positioning, pricing/packaging, onboarding architecture, roadmap assumptions, tracking quality, codebase constraints, and major funnel bets across every configured project.",
-        "instructions": "Find structural constraints and durable opportunities. Tie recommendations to cohort behavior, monetization, reviews, channel quality, and shipped changes."
+        "objective": "Revisit positioning, pricing/packaging, onboarding architecture, roadmap assumptions, tracking quality, codebase constraints, and major funnel bets across every configured app.",
+        "instructions": "Find structural constraints and durable opportunities, not small UI tweaks. Group the analysis by app and tie recommendations to cohort behavior, monetization, reviews, channel quality, and shipped changes. Include concrete roadmap, pricing, conversion, and traffic recommendations."
       },
       {
         "key": "six_months",
@@ -124,8 +134,8 @@
         "criticalOnly": false,
         "focusAreas": ["retention", "conversion", "paywall", "marketing", "general"],
         "sourcePriorities": ["analytics", "revenuecat", "asc_cli", "feedback", "sentry"],
-        "objective": "Audit connector coverage, SDK instrumentation, event taxonomy, data reliability, memory, growth loops, and whether product/code strategy still matches the best users across configured projects.",
-        "instructions": "Prioritize measurement fixes and system changes that make future analysis more trustworthy. Identify stale events, missing attribution, weak identity, and misleading dashboards."
+        "objective": "Audit connector coverage, SDK instrumentation, event taxonomy, data reliability, memory, growth loops, and whether product/code strategy still matches the best users across configured apps.",
+        "instructions": "Group by app. Prioritize measurement fixes and system changes that make future analysis more trustworthy, then identify the highest-leverage app/revenue/conversion/traffic improvements. Identify stale events, missing attribution, weak identity, broken feedback loops, and misleading dashboards."
       },
       {
         "key": "yearly",
@@ -141,6 +151,8 @@
   },
   "actions": {
     "mode": "issue",
+    "outputDestinations": ["openclaw_chat", "github_issue"],
+    "productionErrorMode": "issue",
     "autoCreateIssues": true,
     "autoCreatePullRequests": false,
     "autoCreateWhenGitHubWriteAccess": true,
@@ -149,7 +161,7 @@
     "proposalBranchPrefix": "openclaw/proposals"
   },
   "charting": {
-    "enabled": false,
+    "enabled": true,
     "command": null
   },
   "notifications": {
