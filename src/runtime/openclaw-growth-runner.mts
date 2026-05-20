@@ -279,6 +279,12 @@ function isTransientNetworkFailure(value) {
   );
 }
 
+function isRequiredSource(sourceConfig, sourceName) {
+  if (sourceConfig?.required === true) return true;
+  if (sourceConfig?.required === false) return false;
+  return String(sourceName || '').toLowerCase() === 'analytics';
+}
+
 function isTruthyEnv(value) {
   return ['1', 'true', 'yes', 'y', 'on'].includes(String(value || '').trim().toLowerCase());
 }
@@ -1736,6 +1742,7 @@ async function resolveSourcePayloadWithCursor(sourceConfig, sourceName, cursorSt
       payload: null,
       nextCursor: cursorState || null,
       resolvedCommand: null,
+      failure: null,
     };
   }
 
@@ -1756,8 +1763,23 @@ async function resolveSourcePayloadWithCursor(sourceConfig, sourceName, cursorSt
       result = await runShellCommand(String(resolvedCommand), 120_000, { cwd: commandCwd });
     }
     if (!result.ok) {
+      const detail = `${retried ? 'transient network error persisted after retry: ' : ''}${result.stderr || `exit ${result.code}`}`;
+      if (retried && !isRequiredSource(sourceConfig, sourceName)) {
+        return {
+          payload: null,
+          nextCursor: cursorState || null,
+          resolvedCommand,
+          failure: {
+            source: sourceName,
+            transient: true,
+            retried: true,
+            at: new Date().toISOString(),
+            detail,
+          },
+        };
+      }
       throw new Error(
-        `Source "${sourceName}" command failed: ${retried ? 'transient network error persisted after retry: ' : ''}${result.stderr || `exit ${result.code}`}`,
+        `Source "${sourceName}" command failed: ${detail}`,
       );
     }
     const fetchedAt = new Date().toISOString();
@@ -1774,6 +1796,7 @@ async function resolveSourcePayloadWithCursor(sourceConfig, sourceName, cursorSt
               }
             : cursorState || null,
         resolvedCommand,
+        failure: null,
       };
     } catch {
       throw new Error(`Source "${sourceName}" returned non-JSON output.`);
@@ -1788,6 +1811,7 @@ async function resolveSourcePayloadWithCursor(sourceConfig, sourceName, cursorSt
     payload: await readJson(path.resolve(String(sourceConfig.path))),
     nextCursor: cursorState || null,
     resolvedCommand: null,
+    failure: null,
   };
 }
 
@@ -1823,6 +1847,17 @@ async function loadSourcePayloads(config, state, configPath) {
     }
     if (result.nextCursor) {
       sourceCursors[source.key] = result.nextCursor;
+    }
+    if (result.failure) {
+      sourceFailures.push(result.failure);
+      await appendSchedulerProof('source_collection_degraded', {
+        configPath,
+        source: result.failure.source,
+        transient: result.failure.transient,
+        retried: result.failure.retried,
+        detail: result.failure.detail,
+        socialOutput: 'HEARTBEAT_OK',
+      });
     }
   }
   return {
@@ -1926,6 +1961,7 @@ async function runOnce(configPath, statePath) {
           ...stateAfterSourceCollection,
           sourceHashes: currentHashes,
           sourceCursors,
+          lastSourceFailures: sourceFailures,
           lastRunAt: completedAt,
           skippedReason: 'cadence_not_due',
         },
@@ -1939,6 +1975,7 @@ async function runOnce(configPath, statePath) {
       statePath,
       completedAt,
       skippedReason: 'cadence_not_due',
+      sourceFailures,
       socialOutput: 'HEARTBEAT_OK',
     });
     return;
@@ -1996,6 +2033,7 @@ async function runOnce(configPath, statePath) {
           ...stateAfterSourceCollection,
           sourceHashes: currentHashes,
           sourceCursors,
+          lastSourceFailures: sourceFailures,
           lastIssueFingerprint: issueFingerprint,
           lastRunAt: completedAt,
           lastOutFile: dryRun.outFile,
@@ -2022,6 +2060,7 @@ async function runOnce(configPath, statePath) {
       activeCadences: activeCadences.map((cadence) => cadence.key),
       outFile: dryRun.outFile,
       issueCount: Number(dryRun.issuesPayload?.issue_count || 0),
+      sourceFailures,
       externalGrowthNotification: 'suppressed_unchanged_issue_set',
       socialOutput: 'HEARTBEAT_OK',
     });
@@ -2065,6 +2104,7 @@ async function runOnce(configPath, statePath) {
         ...stateAfterSourceCollection,
         sourceHashes: currentHashes,
         sourceCursors,
+        lastSourceFailures: sourceFailures,
         lastIssueFingerprint: issueFingerprint,
         lastRunAt: completedAt,
         lastOutFile: dryRun.outFile,
@@ -2094,6 +2134,7 @@ async function runOnce(configPath, statePath) {
     activeCadences: activeCadences.map((cadence) => cadence.key),
     outFile: dryRun.outFile,
     issueCount: Number(dryRun.issuesPayload?.issue_count || 0),
+    sourceFailures,
     createdGitHubArtifact: shouldCreateGitHubArtifact,
   });
 }

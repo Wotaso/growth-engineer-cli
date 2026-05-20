@@ -6,6 +6,31 @@ import { writeJsonOutput, buildSentrySummary } from './openclaw-exporters-lib.mj
 
 const DEFAULT_BASE_URL = 'https://sentry.io';
 const DEFAULT_CONFIG_PATH = 'data/openclaw-growth-engineer/config.json';
+const DEFAULT_SENTRY_FETCH_RETRIES = 3;
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function parseRetryAfterMs(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return null;
+  const seconds = Number(raw);
+  if (Number.isFinite(seconds) && seconds >= 0) return seconds * 1000;
+  const dateMs = Date.parse(raw);
+  if (Number.isFinite(dateMs)) return Math.max(0, dateMs - Date.now());
+  return null;
+}
+
+function isRetryableSentryStatus(status) {
+  return status === 429 || status >= 500;
+}
+
+function getSentryRetryDelayMs(response, attempt) {
+  const retryAfterMs = parseRetryAfterMs(response.headers.get('retry-after'));
+  if (retryAfterMs !== null) return Math.min(retryAfterMs, 15_000);
+  return Math.min(1_000 * 2 ** attempt, 8_000);
+}
 
 function printHelpAndExit(exitCode, reason = null) {
   if (reason) {
@@ -250,19 +275,38 @@ function apiListItems(payload) {
 }
 
 async function sentryFetchJson(url, token) {
-  const response = await fetch(url, {
-    method: 'GET',
-    headers: {
-      Accept: 'application/json',
-      Authorization: `Bearer ${token}`,
-      'User-Agent': 'openclaw-growth-sentry-exporter',
-    },
-  });
-  const body = await response.text();
-  if (!response.ok) {
-    throw new Error(`Sentry API ${response.status}: ${body.slice(0, 500) || 'request failed'}`);
+  let lastError = null;
+  for (let attempt = 0; attempt < DEFAULT_SENTRY_FETCH_RETRIES; attempt += 1) {
+    let response;
+    try {
+      response = await fetch(url, {
+        method: 'GET',
+        headers: {
+          Accept: 'application/json',
+          Authorization: `Bearer ${token}`,
+          'User-Agent': 'openclaw-growth-sentry-exporter',
+        },
+      });
+    } catch (error) {
+      lastError = error;
+      if (attempt < DEFAULT_SENTRY_FETCH_RETRIES - 1) {
+        await sleep(Math.min(1_000 * 2 ** attempt, 8_000));
+        continue;
+      }
+      throw error;
+    }
+    const body = await response.text();
+    if (response.ok) {
+      return body ? JSON.parse(body) : null;
+    }
+    lastError = new Error(`Sentry API ${response.status}: ${body.slice(0, 500) || 'request failed'}`);
+    if (isRetryableSentryStatus(response.status) && attempt < DEFAULT_SENTRY_FETCH_RETRIES - 1) {
+      await sleep(getSentryRetryDelayMs(response, attempt));
+      continue;
+    }
+    throw lastError;
   }
-  return body ? JSON.parse(body) : null;
+  throw lastError || new Error('Sentry API request failed');
 }
 
 async function sentryFetchList(url, token) {
