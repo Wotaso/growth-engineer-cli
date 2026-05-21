@@ -285,6 +285,25 @@ function isRequiredSource(sourceConfig, sourceName) {
   return String(sourceName || '').toLowerCase() === 'analytics';
 }
 
+function isSentryCompatibleSource(sourceConfig, sourceName) {
+  const sourceKey = String(sourceName || '').toLowerCase();
+  const service = String(sourceConfig?.service || sourceConfig?.provider || '').toLowerCase();
+  const command = String(sourceConfig?.command || '').toLowerCase();
+  return (
+    sourceKey === 'sentry' ||
+    sourceKey === 'glitchtip' ||
+    service === 'sentry' ||
+    service === 'glitchtip' ||
+    command.includes('export-sentry-summary')
+  );
+}
+
+function shouldDegradeTransientSourceFailure(sourceConfig, sourceName, retried) {
+  if (!retried) return false;
+  if (!isRequiredSource(sourceConfig, sourceName)) return true;
+  return isSentryCompatibleSource(sourceConfig, sourceName);
+}
+
 function isTruthyEnv(value) {
   return ['1', 'true', 'yes', 'y', 'on'].includes(String(value || '').trim().toLowerCase());
 }
@@ -1764,7 +1783,7 @@ async function resolveSourcePayloadWithCursor(sourceConfig, sourceName, cursorSt
     }
     if (!result.ok) {
       const detail = `${retried ? 'transient network error persisted after retry: ' : ''}${result.stderr || `exit ${result.code}`}`;
-      if (retried && !isRequiredSource(sourceConfig, sourceName)) {
+      if (shouldDegradeTransientSourceFailure(sourceConfig, sourceName, retried)) {
         return {
           payload: null,
           nextCursor: cursorState || null,
