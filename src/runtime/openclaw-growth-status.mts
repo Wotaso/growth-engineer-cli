@@ -175,6 +175,41 @@ function connector(status, detail, extra: Record<string, unknown> = {}) {
   };
 }
 
+function getSentryAccountMetadata(config) {
+  const sentrySource = config?.sources?.sentry || {};
+  const configured = Array.isArray(sentrySource.accounts) ? sentrySource.accounts : [];
+  const accounts = configured.length > 0
+    ? configured
+    : [{
+        id: 'sentry',
+        label: 'Sentry',
+        baseUrl: process.env.SENTRY_BASE_URL || 'https://sentry.io',
+        tokenEnv: config?.secrets?.sentryTokenEnv || 'SENTRY_AUTH_TOKEN',
+        org: process.env.SENTRY_ORG || '',
+        projects: process.env.SENTRY_PROJECT ? [process.env.SENTRY_PROJECT] : [],
+        environment: process.env.SENTRY_ENVIRONMENT || 'production',
+      }];
+  const byId = new Map();
+  for (const [index, account] of accounts.entries()) {
+    const id = String(account?.id || account?.key || account?.label || `sentry_${index + 1}`)
+      .trim()
+      .replace(/[^a-zA-Z0-9._-]+/g, '_');
+    byId.set(id, {
+      id,
+      label: String(account?.label || account?.name || account?.id || `Sentry ${index + 1}`).trim(),
+      baseUrl: String(account?.baseUrl || account?.base_url || account?.url || 'https://sentry.io').trim(),
+      org: String(account?.org || account?.organization || '').trim(),
+      projects: Array.isArray(account?.projects)
+        ? account.projects.map((project) => String(typeof project === 'string' ? project : project?.project || project?.slug || '').trim()).filter(Boolean)
+        : account?.project
+          ? [String(account.project).trim()].filter(Boolean)
+          : [],
+      environment: String(account?.environment || process.env.SENTRY_ENVIRONMENT || 'production').trim(),
+    });
+  }
+  return byId;
+}
+
 function isEnabled(source) {
   return Boolean(source && source.enabled !== false);
 }
@@ -304,9 +339,11 @@ function summarizeSentry(preflight, config) {
   const accountConnections = checksByPrefix(preflight, 'connection:sentry:');
   const connection = checkByName(preflight, 'connection:sentry');
   const command = checkByName(preflight, 'connection:sentry-command');
+  const accountMetadata = getSentryAccountMetadata(config);
   if (accountConnections.length > 0) {
     const failed = accountConnections.filter((entry) => entry.status !== 'pass');
     const accounts = accountConnections.map((entry) => ({
+      ...(accountMetadata.get(String(entry.name || '').replace(/^connection:sentry:/, '')) || {}),
       id: String(entry.name || '').replace(/^connection:sentry:/, ''),
       status: entry.status === 'pass' ? 'connected' : 'blocked',
       detail: entry.detail,
@@ -325,12 +362,21 @@ function summarizeSentry(preflight, config) {
     });
   }
   if (connection?.status === 'pass' && (!command || command.status === 'pass')) {
-    return connector('connected', command ? 'Sentry API and exporter smoke test passed' : 'Sentry API auth check passed');
+    return connector('connected', command ? 'Sentry API and exporter smoke test passed' : 'Sentry API auth check passed', {
+      accounts: [...accountMetadata.values()].map((account) => ({ ...account, status: 'connected' })),
+    });
   }
   if (connection?.status === 'pass' && command?.status !== 'pass') {
-    return connector('partial', command?.detail || 'Sentry API auth passed, exporter smoke test did not pass');
+    return connector('partial', command?.detail || 'Sentry API auth passed, exporter smoke test did not pass', {
+      accounts: [...accountMetadata.values()].map((account) => ({ ...account, status: 'connected' })),
+    });
   }
   return connector('blocked', connection?.detail || 'Sentry connection was not verified', {
+    accounts: [...accountMetadata.values()].map((account) => ({
+      ...account,
+      status: 'blocked',
+      detail: connection?.detail || 'Sentry connection was not verified',
+    })),
     nextAction: `Run: ${WIZARD_COMMAND} --connectors sentry.`,
   });
 }

@@ -14,11 +14,12 @@ const PRIORITY_WEIGHT = {
 
 const AREA_KEYWORDS = {
   onboarding: ['onboarding', 'welcome', 'signup', 'register', 'tutorial', 'first_session'],
-  paywall: ['paywall', 'pricing', 'subscription', 'purchase', 'premium', 'trial', 'revenuecat'],
+  paywall: ['paywall', 'pricing', 'subscription', 'purchase', 'premium', 'trial', 'revenuecat', 'paddle'],
   retention: ['retention', 'streak', 'come_back', 'session', 'habit', 'reminder', 'notification'],
-  conversion: ['checkout', 'purchase', 'billing', 'trial', 'subscribe', 'price'],
+  conversion: ['checkout', 'purchase', 'billing', 'trial', 'subscribe', 'price', 'paddle'],
+  revenue: ['revenue', 'mrr', 'subscriber', 'subscription', 'refund', 'chargeback', 'paddle', 'revenuecat'],
   crash: ['error', 'exception', 'crash', 'stack', 'sentry', 'fatal'],
-  marketing: ['store', 'metadata', 'keyword', 'seo', 'landing', 'copy', 'conversion_copy'],
+  marketing: ['store', 'metadata', 'keyword', 'seo', 'landing', 'copy', 'conversion_copy', 'gsc', 'dataforseo', 'search console'],
   infrastructure: ['coolify', 'deployment', 'deploy', 'hosting', 'server', 'health check', 'availability'],
 };
 
@@ -42,6 +43,11 @@ const DEFAULT_PROPOSALS = {
     'Reduce purchase flow steps and remove optional inputs before checkout.',
     'Clarify plan differentiation and default to the strongest value package.',
     'Track abandonment reasons at each step to drive follow-up fixes.',
+  ],
+  revenue: [
+    'Compare revenue movement with activation, checkout, and recent release data before changing pricing.',
+    'Inspect plan, geography, and cohort mix so the issue is tied to a specific monetization surface.',
+    'Add or verify revenue-funnel instrumentation for checkout starts, completions, refunds, and cancellations.',
   ],
   crash: [
     'Reproduce the issue with a deterministic test case and lock a failing assertion.',
@@ -669,6 +675,9 @@ function inferExpectedImpact(signal) {
   }
   if (signal.area === 'marketing') {
     return 'Increase top-of-funnel acquisition quality and store listing conversion.';
+  }
+  if (signal.area === 'revenue') {
+    return 'Improve revenue quality, subscriber growth, or monetization reliability with measurable business impact.';
   }
   if (signal.area === 'paywall' || signal.area === 'conversion') {
     return 'Increase trial start and paid conversion rates in primary monetization flow.';

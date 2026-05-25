@@ -24,6 +24,41 @@ const ANALYTICSCLI_PACKAGE_SPEC = process.env.ANALYTICSCLI_CLI_PACKAGE || '@anal
 const ANALYTICSCLI_NPM_PREFIX =
   process.env.ANALYTICSCLI_NPM_PREFIX ||
   (process.env.HOME ? path.join(process.env.HOME, '.local') : path.join(process.cwd(), '.analyticscli-npm'));
+const ACCOUNT_SIGNAL_CONNECTORS = [
+  'stripe',
+  'lemonsqueezy',
+  'adapty',
+  'superwall',
+  'google-play',
+  'datadog',
+  'bugsnag',
+  'intercom',
+  'zendesk',
+  'apple-search-ads',
+  'google-ads',
+  'meta-ads',
+  'tiktok-ads',
+  'vercel',
+  'cloudflare',
+  'resend',
+  'customerio',
+  'mailchimp',
+  'appfollow',
+  'apptweak',
+  'linear',
+  'postiz',
+];
+const SUPPORTED_CONNECTORS = [
+  'analytics',
+  'github',
+  'asc',
+  'revenuecat',
+  'paddle',
+  'seo',
+  'sentry',
+  'coolify',
+  ...ACCOUNT_SIGNAL_CONNECTORS,
+];
 
 type ShellResult = {
   ok: boolean;
@@ -48,7 +83,7 @@ Options:
   --config <file>        Config path (default: ${DEFAULT_CONFIG_PATH})
   --test-connections     Run live API/connector smoke checks for enabled channels
   --only-connectors <list>
-                         Limit live checks to analytics,github,asc,revenuecat,sentry,coolify
+                         Limit live checks to ${SUPPORTED_CONNECTORS.join(',')}
   --timeout-ms <ms>      Connection test timeout in milliseconds (default: ${DEFAULT_CONNECTION_TIMEOUT_MS})
   --progress-json        Emit machine-readable progress events on stderr
   --json                 Print JSON only (default)
@@ -110,8 +145,32 @@ function normalizeConnectorKey(value) {
   if (['github', 'gh', 'github-code', 'codebase', 'code-access'].includes(normalized)) return 'github';
   if (['asc', 'asc-cli', 'app-store-connect', 'appstoreconnect', 'app-store'].includes(normalized)) return 'asc';
   if (['revenuecat', 'revenue-cat', 'rc', 'revenuecat-mcp'].includes(normalized)) return 'revenuecat';
+  if (['paddle', 'paddle-billing', 'billing-metrics', 'web-revenue'].includes(normalized)) return 'paddle';
+  if (['seo', 'gsc', 'google-search-console', 'search-console', 'dataforseo', 'organic-search'].includes(normalized)) return 'seo';
   if (['sentry', 'sentry-api', 'sentry-mcp', 'glitchtip', 'crashes', 'errors', 'crash-reporting'].includes(normalized)) return 'sentry';
   if (['coolify', 'coolify-api', 'deployment', 'deployments', 'hosting', 'infra', 'infrastructure'].includes(normalized)) return 'coolify';
+  if (['stripe', 'stripe-billing', 'stripe-payments'].includes(normalized)) return 'stripe';
+  if (['lemonsqueezy', 'lemon-squeezy', 'lemon', 'ls'].includes(normalized)) return 'lemonsqueezy';
+  if (['adapty', 'adapty-paywalls', 'adapty-subscriptions'].includes(normalized)) return 'adapty';
+  if (['superwall', 'superwall-paywalls'].includes(normalized)) return 'superwall';
+  if (['google-play', 'google-play-console', 'play-console', 'play-store', 'android-store'].includes(normalized)) return 'google-play';
+  if (['datadog', 'datadog-rum', 'datadog-apm', 'datadog-logs'].includes(normalized)) return 'datadog';
+  if (['bugsnag', 'bugsnag-crashes'].includes(normalized)) return 'bugsnag';
+  if (['intercom', 'intercom-support'].includes(normalized)) return 'intercom';
+  if (['zendesk', 'zendesk-support'].includes(normalized)) return 'zendesk';
+  if (['apple-search-ads', 'apple-ads', 'asa', 'search-ads'].includes(normalized)) return 'apple-search-ads';
+  if (['google-ads', 'adwords'].includes(normalized)) return 'google-ads';
+  if (['meta-ads', 'facebook-ads', 'instagram-ads', 'fb-ads'].includes(normalized)) return 'meta-ads';
+  if (['tiktok-ads', 'tiktok-business', 'tiktok-business-api'].includes(normalized)) return 'tiktok-ads';
+  if (['vercel', 'vercel-deployments', 'vercel-hosting'].includes(normalized)) return 'vercel';
+  if (['cloudflare', 'cf', 'cloudflare-workers', 'cloudflare-pages'].includes(normalized)) return 'cloudflare';
+  if (['resend', 'resend-email'].includes(normalized)) return 'resend';
+  if (['customerio', 'customer-io', 'customer.io', 'cio'].includes(normalized)) return 'customerio';
+  if (['mailchimp', 'mailchimp-marketing'].includes(normalized)) return 'mailchimp';
+  if (['appfollow', 'app-follow'].includes(normalized)) return 'appfollow';
+  if (['apptweak', 'app-tweak'].includes(normalized)) return 'apptweak';
+  if (['linear', 'linear-issues', 'linear-planning'].includes(normalized)) return 'linear';
+  if (['postiz', 'postiz-api', 'social-publishing', 'social-scheduler'].includes(normalized)) return 'postiz';
   return null;
 }
 
@@ -121,15 +180,10 @@ function parseConnectorList(value) {
   for (const entry of String(value).split(',')) {
     const connector = normalizeConnectorKey(entry);
     if (!connector) {
-      printHelpAndExit(1, `Unknown connector: ${entry.trim()}. Use analytics, github, asc, revenuecat, sentry, coolify, or all.`);
+      printHelpAndExit(1, `Unknown connector: ${entry.trim()}. Use ${SUPPORTED_CONNECTORS.join(', ')}, or all.`);
     }
     if (connector === 'all') {
-      connectors.add('analytics');
-      connectors.add('github');
-      connectors.add('asc');
-      connectors.add('revenuecat');
-      connectors.add('sentry');
-      connectors.add('coolify');
+      SUPPORTED_CONNECTORS.forEach((supported) => connectors.add(supported));
     } else {
       connectors.add(connector);
     }
@@ -164,7 +218,7 @@ function replaceLegacyRuntimeScriptCommand(command) {
   const trimmed = String(command || '').trim();
   if (!trimmed) return trimmed;
   return trimmed.replace(
-    /^node\s+scripts\/(export-analytics-summary\.mjs|export-revenuecat-summary\.mjs|export-sentry-summary\.mjs|export-asc-summary\.mjs|openclaw-growth-start\.mjs|openclaw-growth-status\.mjs|openclaw-growth-preflight\.mjs|openclaw-growth-runner\.mjs|openclaw-growth-engineer\.mjs)(?=\s|$)/,
+    /^node\s+scripts\/(export-analytics-summary\.mjs|export-revenuecat-summary\.mjs|export-paddle-summary\.mjs|export-seo-summary\.mjs|export-sentry-summary\.mjs|export-asc-summary\.mjs|openclaw-growth-start\.mjs|openclaw-growth-status\.mjs|openclaw-growth-preflight\.mjs|openclaw-growth-runner\.mjs|openclaw-growth-engineer\.mjs)(?=\s|$)/,
     (_match, scriptName) => nodeRuntimeScriptCommand(scriptName),
   );
 }
@@ -174,7 +228,7 @@ function commandHasConfigArg(command) {
 }
 
 function commandIsBuiltinExporter(command) {
-  return /(?:^|\s)(?:node\s+)?(?:\S*\/)?(?:export-analytics-summary|export-revenuecat-summary|export-sentry-summary|export-coolify-summary|export-asc-summary)\.mjs(?:\s|$)/.test(
+  return /(?:^|\s)(?:node\s+)?(?:\S*\/)?(?:export-analytics-summary|export-revenuecat-summary|export-paddle-summary|export-seo-summary|export-sentry-summary|export-coolify-summary|export-asc-summary)\.mjs(?:\s|$)/.test(
     String(command || ''),
   );
 }
@@ -703,6 +757,49 @@ async function testRevenueCatConnection(revenuecatToken, timeoutMs) {
   }
 }
 
+async function testPaddleConnection(paddleToken, timeoutMs) {
+  if (!paddleToken) {
+    return {
+      ok: false,
+      detail: 'missing token',
+    };
+  }
+  const to = new Date().toISOString().slice(0, 10);
+  const fromDate = new Date();
+  fromDate.setUTCDate(fromDate.getUTCDate() - 2);
+  const from = fromDate.toISOString().slice(0, 10);
+  try {
+    const response = await fetchWithTimeout(
+      `https://api.paddle.com/metrics/revenue?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`,
+      {
+        method: 'GET',
+        headers: {
+          Accept: 'application/json',
+          Authorization: `Bearer ${paddleToken}`,
+          'Paddle-Version': '1',
+        },
+      },
+      timeoutMs,
+    );
+
+    if (!response.ok) {
+      return {
+        ok: false,
+        detail: `HTTP ${response.status}: ${truncate(response.body)}`,
+      };
+    }
+    return {
+      ok: true,
+      detail: `HTTP ${response.status}`,
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      detail: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
 function describeAnalyticsConnectionFailure(detail, analyticsTokenEnv, hasAnalyticsToken) {
   if (!hasAnalyticsToken) {
     return `AnalyticsCLI needs query access. Run \`npx -y @analyticscli/growth-engineer@preview wizard --connectors analytics\`, create or copy a readonly CLI token in dash.analyticscli.com -> API Keys, and paste it into the local terminal wizard. Raw error: ${detail}`;
@@ -819,6 +916,13 @@ function normalizeSentryAccounts(config, sentryTokenEnv) {
       label: String(account?.label || account?.name || account?.id || `Sentry ${index + 1}`).trim(),
       tokenEnv: String(account?.tokenEnv || account?.token_env || account?.secretEnv || sentryTokenEnv).trim(),
       baseUrl: String(account?.baseUrl || account?.base_url || account?.url || 'https://sentry.io').trim(),
+      org: String(account?.org || account?.organization || '').trim(),
+      projects: Array.isArray(account?.projects)
+        ? account.projects.map((project) => String(typeof project === 'string' ? project : project?.project || project?.slug || '').trim()).filter(Boolean)
+        : account?.project
+          ? [String(account.project).trim()].filter(Boolean)
+          : [],
+      environment: String(account?.environment || process.env.SENTRY_ENVIRONMENT || 'production').trim(),
     }));
   }
   return [
@@ -827,8 +931,24 @@ function normalizeSentryAccounts(config, sentryTokenEnv) {
       label: 'Sentry',
       tokenEnv: sentryTokenEnv,
       baseUrl: String(process.env.SENTRY_BASE_URL || 'https://sentry.io').trim(),
+      org: String(process.env.SENTRY_ORG || '').trim(),
+      projects: String(process.env.SENTRY_PROJECT || '').trim() ? [String(process.env.SENTRY_PROJECT).trim()] : [],
+      environment: String(process.env.SENTRY_ENVIRONMENT || 'production').trim(),
     },
   ];
+}
+
+function describeSentryAccountTarget(account) {
+  const parts = [
+    account.label,
+    `id=${account.key}`,
+    `baseUrl=${account.baseUrl || 'https://sentry.io'}`,
+    account.org ? `org=${account.org}` : null,
+    account.projects?.length ? `projects=${account.projects.join(',')}` : null,
+    account.environment ? `environment=${account.environment}` : null,
+    account.tokenEnv ? `tokenEnv=${account.tokenEnv}` : null,
+  ].filter(Boolean);
+  return parts.join(' ');
 }
 
 async function testGitHubConnection(githubToken, githubRepo, timeoutMs, actionMode) {
@@ -960,6 +1080,8 @@ async function runConnectionChecks({ checks, config, configPath, timeoutMs, prog
   const tasks = [];
   const analyticsTokenEnv = getSecretName(config, 'analyticsTokenEnv', 'ANALYTICSCLI_ACCESS_TOKEN');
   const revenuecatTokenEnv = getSecretName(config, 'revenuecatTokenEnv', 'REVENUECAT_API_KEY');
+  const paddleTokenEnv = getSecretName(config, 'paddleTokenEnv', 'PADDLE_API_KEY');
+  const gscTokenEnv = getSecretName(config, 'gscTokenEnv', 'GOOGLE_SEARCH_CONSOLE_ACCESS_TOKEN');
   const sentryTokenEnv = getSecretName(config, 'sentryTokenEnv', 'SENTRY_AUTH_TOKEN');
   const coolifyTokenEnv = getSecretName(config, 'coolifyTokenEnv', 'COOLIFY_API_TOKEN');
   const feedbackTokenEnv = getSecretName(config, 'feedbackTokenEnv', 'FEEDBACK_API_TOKEN');
@@ -1053,6 +1175,120 @@ async function runConnectionChecks({ checks, config, configPath, timeoutMs, prog
     });
   }
 
+  const paddleSource = config.sources?.paddle;
+  if (onlyAllows(onlyConnectors, 'paddle')) {
+    scheduleProgressGroup(tasks, checks, progressJson, {
+      key: 'paddle',
+      label: 'Paddle',
+      detail: 'metrics API auth + revenue read',
+      run: async (groupChecks) => {
+      if (sourceEnabled(config, 'paddle')) {
+        const token = process.env[paddleTokenEnv] || '';
+        if (!token) {
+          addCheck(
+            groupChecks,
+            'connection:paddle',
+            false,
+            `${paddleTokenEnv} missing (required for live Paddle metrics API test)`,
+            paddleSource?.mode === 'command' ? 'fail' : 'warn',
+          );
+        } else {
+          const paddleConnection = await testPaddleConnection(token, timeoutMs);
+          addCheck(
+            groupChecks,
+            'connection:paddle',
+            paddleConnection.ok,
+            paddleConnection.ok
+              ? `Paddle metrics auth check passed (${paddleConnection.detail})`
+              : `Paddle metrics auth check failed (${paddleConnection.detail})`,
+          );
+        }
+        if (paddleSource?.mode === 'command') {
+          const command = withActiveConfigArg(
+            replaceLegacyRuntimeScriptCommand(String(paddleSource.command || '').trim()),
+            configPath,
+          );
+          if (!command) {
+            addCheck(groupChecks, 'connection:paddle-command', false, 'paddle source uses command mode but no command configured');
+          } else {
+            const commandCheck = await testCommandSourceJson(`${command} --last 2d --max-signals 1`, commandCwd);
+            addCheck(
+              groupChecks,
+              'connection:paddle-command',
+              commandCheck.ok,
+              commandCheck.ok
+                ? 'Paddle command smoke test passed'
+                : `Paddle command smoke test failed (${commandCheck.detail})`,
+            );
+          }
+        }
+      } else {
+        addCheck(groupChecks, 'connection:paddle', true, 'source disabled');
+      }
+      },
+    });
+  }
+
+  const seoSource = config.sources?.seo;
+  if (onlyAllows(onlyConnectors, 'seo')) {
+    scheduleProgressGroup(tasks, checks, progressJson, {
+      key: 'seo',
+      label: 'SEO / GSC',
+      detail: 'Search Console auth or CSV/DataForSEO config',
+      run: async (groupChecks) => {
+      if (sourceEnabled(config, 'seo')) {
+        const hasGscCredential = Boolean(
+          process.env[gscTokenEnv] ||
+            process.env.GSC_ACCESS_TOKEN ||
+            process.env.GOOGLE_APPLICATION_CREDENTIALS ||
+            process.env.GSC_SERVICE_ACCOUNT_JSON ||
+            process.env.GOOGLE_SERVICE_ACCOUNT_JSON,
+        );
+        addCheck(
+          groupChecks,
+          'connection:seo:gsc-credentials',
+          hasGscCredential || seoSource?.mode !== 'command',
+          hasGscCredential
+            ? 'GSC credential is configured'
+            : 'GSC credential missing; command can still run in CSV-only mode if --gsc-csv/--csv is configured',
+          hasGscCredential ? 'pass' : 'warn',
+        );
+        addCheck(
+          groupChecks,
+          'connection:seo:gsc-site',
+          true,
+          process.env.GSC_SITE_URL || seoSource?.siteUrl || seoSource?.site_url
+            ? 'GSC site/property is pinned intentionally'
+            : 'no GSC site/property pinned; exporter will list and query all verified Search Console properties',
+          'pass',
+        );
+        if (seoSource?.mode === 'command') {
+          const command = withActiveConfigArg(
+            replaceLegacyRuntimeScriptCommand(String(seoSource.command || '').trim()),
+            configPath,
+          );
+          if (!command) {
+            addCheck(groupChecks, 'connection:seo-command', false, 'seo source uses command mode but no command configured');
+          } else {
+            const commandCheck = await testCommandSourceJson(`${command} --row-limit 5 --max-signals 1`, commandCwd);
+            addCheck(
+              groupChecks,
+              'connection:seo-command',
+              commandCheck.ok,
+              commandCheck.ok
+                ? 'SEO command smoke test passed'
+                : `SEO command smoke test failed (${commandCheck.detail})`,
+              hasGscCredential || /--csv|--gsc-csv/.test(command) ? 'fail' : 'warn',
+            );
+          }
+        }
+      } else {
+        addCheck(groupChecks, 'connection:seo', true, 'source disabled');
+      }
+      },
+    });
+  }
+
   const sentrySource = config.sources?.sentry;
   if (onlyAllows(onlyConnectors, 'sentry')) {
     scheduleProgressGroup(tasks, checks, progressJson, {
@@ -1065,12 +1301,13 @@ async function runConnectionChecks({ checks, config, configPath, timeoutMs, prog
         for (const account of sentryAccounts) {
           const token = process.env[account.tokenEnv] || '';
           const checkName = sentryAccounts.length > 1 ? `connection:sentry:${account.key}` : 'connection:sentry';
+          const accountTarget = describeSentryAccountTarget(account);
           if (!token) {
             addCheck(
               groupChecks,
               checkName,
               false,
-              `${account.tokenEnv} missing (required for live Sentry API test for ${account.label})`,
+              `${account.tokenEnv} missing (required for live Sentry API test for ${accountTarget})`,
               sentrySource?.mode === 'command' ? 'fail' : 'warn',
             );
             continue;
@@ -1081,8 +1318,8 @@ async function runConnectionChecks({ checks, config, configPath, timeoutMs, prog
             checkName,
             sentryConnection.ok,
             sentryConnection.ok
-              ? `${account.label} auth check passed (${sentryConnection.detail})`
-              : `${account.label} auth check failed (${sentryConnection.detail})`,
+              ? `${accountTarget} auth check passed (${sentryConnection.detail})`
+              : `${accountTarget} auth check failed (${sentryConnection.detail})`,
           );
         }
         if (sentrySource?.mode === 'command') {
@@ -1100,12 +1337,20 @@ async function runConnectionChecks({ checks, config, configPath, timeoutMs, prog
               commandCheck.ok,
               commandCheck.ok
                 ? 'Sentry command smoke test passed'
-                : `Sentry command smoke test failed (${commandCheck.detail})`,
+                : `Sentry command smoke test failed (${commandCheck.detail}); configured accounts: ${sentryAccounts.map(describeSentryAccountTarget).join(' | ')}`,
             );
           }
         }
       } else {
-        addCheck(groupChecks, 'connection:sentry', true, 'source disabled');
+        const requiredByConnectorSetup = onlyAllows(onlyConnectors, 'sentry') && onlyConnectors.length > 0;
+        addCheck(
+          groupChecks,
+          'connection:sentry',
+          !requiredByConnectorSetup,
+          requiredByConnectorSetup
+            ? 'selected Sentry connector is still disabled in sources.sentry'
+            : 'source disabled',
+        );
       }
       },
     });
@@ -1217,8 +1462,11 @@ async function runConnectionChecks({ checks, config, configPath, timeoutMs, prog
 
   for (const extraSource of getAllSourceEntries(config).filter((source) => !source.builtIn)) {
     const serviceKind = classifyServiceKind(extraSource.service || extraSource.key);
+    const explicitConnectorKind = normalizeConnectorKey(extraSource.key || extraSource.service);
     const connectorKind =
-      serviceKind === 'store'
+      explicitConnectorKind && explicitConnectorKind !== 'all'
+        ? explicitConnectorKind
+        : serviceKind === 'store'
         ? 'asc'
         : serviceKind === 'revenue'
           ? 'revenuecat'
@@ -1226,6 +1474,8 @@ async function runConnectionChecks({ checks, config, configPath, timeoutMs, prog
             ? 'sentry'
             : serviceKind === 'infrastructure'
               ? 'coolify'
+              : serviceKind === 'seo'
+                ? 'seo'
             : serviceKind;
     if (!onlyAllows(onlyConnectors, connectorKind)) continue;
     const checkName = `connection:${extraSource.key}`;
@@ -1465,6 +1715,41 @@ async function main() {
             `secret:${revenuecatTokenEnv}`,
             hasRevenuecatToken,
             hasRevenuecatToken ? 'set (required for RevenueCat command mode)' : 'missing (required for RevenueCat command mode)',
+          );
+        }
+
+        if (sourceName === 'paddle') {
+          const paddleTokenEnv = getSecretName(config, 'paddleTokenEnv', 'PADDLE_API_KEY');
+          const hasPaddleToken = Boolean(process.env[paddleTokenEnv]);
+          addCheck(
+            checks,
+            `secret:${paddleTokenEnv}`,
+            hasPaddleToken,
+            hasPaddleToken ? 'set (required for Paddle command mode)' : 'missing (required for Paddle command mode)',
+          );
+        }
+
+        if (sourceName === 'seo') {
+          const gscTokenEnv = getSecretName(config, 'gscTokenEnv', 'GOOGLE_SEARCH_CONSOLE_ACCESS_TOKEN');
+          const hasSearchConsoleAuth = Boolean(
+            process.env[gscTokenEnv] ||
+              process.env.GSC_ACCESS_TOKEN ||
+              process.env.GOOGLE_APPLICATION_CREDENTIALS ||
+              process.env.GSC_SERVICE_ACCOUNT_JSON ||
+              process.env.GOOGLE_SERVICE_ACCOUNT_JSON,
+          );
+          const commandText = String(source.command || '');
+          const csvOnly = /--csv|--gsc-csv/.test(commandText);
+          addCheck(
+            checks,
+            `secret:${gscTokenEnv}`,
+            hasSearchConsoleAuth || csvOnly,
+            hasSearchConsoleAuth
+              ? 'set or service-account auth configured'
+              : csvOnly
+                ? 'not required for configured CSV-only SEO command'
+                : 'missing (required for GSC API mode; CSV-only mode may use --gsc-csv/--csv)',
+            hasSearchConsoleAuth || csvOnly ? 'pass' : 'warn',
           );
         }
 

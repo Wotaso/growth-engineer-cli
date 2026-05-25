@@ -44,21 +44,21 @@ const DEFAULT_CADENCES = [
     intervalDays: 1,
     criticalOnly: true,
     focusAreas: ['analytics_anomaly', 'onboarding', 'conversion', 'paywall', 'purchase', 'retention', 'revenue'],
-    sourcePriorities: ['analytics', 'revenuecat', 'asc_cli', 'feedback', 'github', 'sentry', 'glitchtip', 'coolify'],
+    sourcePriorities: ['analytics', 'revenuecat', 'paddle', 'asc_cli', 'feedback', 'github', 'sentry', 'glitchtip', 'coolify'],
     objective:
       'Detect non-Sentry product and payment anomalies that affect real users: broken login or account flows inferred from behavior, onboarding or purchase drop-offs, zero-conversion days, missing buyers, very low active users, retention cliffs, and revenue anomalies.',
     instructions:
-      'Compare AnalyticsCLI, RevenueCat, ASC, feedback, memory/state, and recent code changes against recent baselines. Use Sentry/GlitchTip/Coolify only as corroborating context; do not repeat pure crash or deployment alerts that belong to the 90-minute healthcheck.',
+      'Compare AnalyticsCLI, RevenueCat, Paddle, ASC, feedback, memory/state, and recent code changes against recent baselines. Use Sentry/GlitchTip/Coolify only as corroborating context; do not repeat pure crash or deployment alerts that belong to the 90-minute healthcheck.',
   },
   {
     key: 'weekly',
     title: 'Weekly executive product and growth summary',
     intervalDays: 7,
     criticalOnly: false,
-    focusAreas: ['conversion', 'paywall', 'onboarding', 'marketing', 'retention', 'stability'],
-    sourcePriorities: ['analytics', 'revenuecat', 'asc_cli', 'feedback', 'sentry', 'coolify', 'github'],
+    focusAreas: ['conversion', 'paywall', 'onboarding', 'marketing', 'retention', 'stability', 'seo'],
+    sourcePriorities: ['analytics', 'revenuecat', 'paddle', 'seo', 'asc_cli', 'feedback', 'sentry', 'coolify', 'github'],
     objective:
-      'Create a deep app-by-app executive summary across all configured projects, connectors, recent releases, code changes, traffic, revenue, activation, conversion, retention, reviews, and production stability.',
+      'Create a deep app-by-app executive summary across all configured projects, connectors, recent releases, code changes, traffic, SEO/acquisition, revenue, activation, conversion, retention, reviews, and production stability.',
     instructions:
       'Be detailed. Group findings per app, explain why each recommendation should improve app usage, revenue, conversion, retention, or traffic, include expected KPI movement, likely code/store surfaces, owner-ready next steps, and verification plans. Generate charts when they clarify the evidence.',
   },
@@ -67,10 +67,10 @@ const DEFAULT_CADENCES = [
     title: 'Monthly deep product, business, and code review',
     intervalDays: 30,
     criticalOnly: false,
-    focusAreas: ['conversion', 'paywall', 'retention', 'marketing', 'onboarding', 'codebase'],
-    sourcePriorities: ['analytics', 'revenuecat', 'asc_cli', 'feedback', 'sentry', 'coolify', 'github'],
+    focusAreas: ['conversion', 'paywall', 'retention', 'marketing', 'onboarding', 'codebase', 'seo'],
+    sourcePriorities: ['analytics', 'revenuecat', 'paddle', 'seo', 'asc_cli', 'feedback', 'sentry', 'coolify', 'github'],
     objective:
-      'Compare all configured projects month-over-month: MRR, trial conversion, churn, acquisition channel quality, store/listing conversion, retention, review themes, feature usage, crash totals, and codebase changes.',
+      'Compare all configured projects month-over-month: MRR, trial conversion, churn, Paddle revenue/subscriber movement, SEO demand/clicks, acquisition channel quality, store/listing conversion, retention, review themes, feature usage, crash totals, and codebase changes.',
     instructions:
       'Be very detailed and app-grouped. Decide what should be built, changed, deleted, priced differently, marketed differently, or instrumented next. Tie conclusions to connector data plus codebase evidence and explain why each recommendation should move revenue, conversion, retention, traffic, or acquisition quality. Generate charts when useful.',
   },
@@ -80,23 +80,23 @@ const DEFAULT_CADENCES = [
     intervalDays: 91,
     criticalOnly: false,
     focusAreas: ['marketing', 'paywall', 'retention', 'conversion', 'onboarding'],
-    sourcePriorities: ['analytics', 'revenuecat', 'asc_cli', 'feedback', 'github', 'sentry'],
+    sourcePriorities: ['analytics', 'revenuecat', 'paddle', 'seo', 'asc_cli', 'feedback', 'github', 'sentry'],
     objective:
       'Revisit positioning, pricing/packaging, onboarding architecture, roadmap assumptions, tracking quality, codebase constraints, and major funnel bets across every configured app.',
     instructions:
-      'Find structural constraints and durable opportunities, not small UI tweaks. Group the analysis by app and tie recommendations to cohort behavior, monetization, reviews, channel quality, and shipped changes. Include concrete roadmap, pricing, conversion, and traffic recommendations.',
+      'Find structural constraints and durable opportunities, not small UI tweaks. Group the analysis by app and tie recommendations to cohort behavior, monetization, SEO demand, reviews, channel quality, and shipped changes. Include concrete roadmap, pricing, conversion, and traffic recommendations.',
   },
   {
     key: 'six_months',
     title: 'Six-month instrumentation and growth-system audit',
     intervalDays: 182,
     criticalOnly: false,
-    focusAreas: ['retention', 'conversion', 'paywall', 'marketing', 'general'],
-    sourcePriorities: ['analytics', 'revenuecat', 'asc_cli', 'feedback', 'sentry'],
+    focusAreas: ['retention', 'conversion', 'paywall', 'marketing', 'general', 'seo'],
+    sourcePriorities: ['analytics', 'revenuecat', 'paddle', 'seo', 'asc_cli', 'feedback', 'sentry'],
     objective:
       'Audit connector coverage, SDK instrumentation, event taxonomy, data reliability, data memory, growth loops, and whether product/code strategy still matches the best users across configured projects.',
     instructions:
-      'Group by app. Prioritize measurement fixes and system changes that make future analysis more trustworthy, then identify the highest-leverage app/revenue/conversion/traffic improvements. Identify stale events, missing attribution, weak identity, broken feedback loops, and misleading dashboards.',
+      'Group by app. Prioritize measurement fixes and system changes that make future analysis more trustworthy, then identify the highest-leverage app/revenue/conversion/SEO/traffic improvements. Identify stale events, missing attribution, weak identity, broken feedback loops, and misleading dashboards.',
   },
   {
     key: 'yearly',
@@ -104,7 +104,7 @@ const DEFAULT_CADENCES = [
     intervalDays: 365,
     criticalOnly: false,
     focusAreas: ['marketing', 'retention', 'paywall', 'conversion', 'general'],
-    sourcePriorities: ['analytics', 'revenuecat', 'asc_cli', 'feedback', 'sentry'],
+    sourcePriorities: ['analytics', 'revenuecat', 'paddle', 'seo', 'asc_cli', 'feedback', 'sentry'],
     objective:
       'Reset strategy from evidence across every configured project: market/channel fit, monetization model, retention ceiling, product scope, and whether to double down, reposition, rebuild, or sunset major surfaces/features.',
     instructions:
@@ -186,7 +186,7 @@ function replaceLegacyRuntimeScriptCommand(command) {
   const trimmed = String(command || '').trim();
   if (!trimmed) return trimmed;
   return trimmed.replace(
-    /^node\s+scripts\/(export-analytics-summary\.mjs|export-revenuecat-summary\.mjs|export-sentry-summary\.mjs|export-coolify-summary\.mjs|export-asc-summary\.mjs|openclaw-growth-engineer\.mjs|openclaw-growth-status\.mjs|openclaw-growth-preflight\.mjs|openclaw-growth-runner\.mjs)(?=\s|$)/,
+    /^node\s+scripts\/(export-analytics-summary\.mjs|export-revenuecat-summary\.mjs|export-paddle-summary\.mjs|export-seo-summary\.mjs|export-sentry-summary\.mjs|export-coolify-summary\.mjs|export-asc-summary\.mjs|openclaw-growth-engineer\.mjs|openclaw-growth-status\.mjs|openclaw-growth-preflight\.mjs|openclaw-growth-runner\.mjs)(?=\s|$)/,
     (_match, scriptName) => nodeRuntimeScriptCommand(scriptName),
   );
 }
@@ -196,13 +196,13 @@ function commandHasConfigArg(command) {
 }
 
 function commandIsBuiltinExporter(command) {
-  return /(?:^|\s)(?:node\s+)?(?:\S*\/)?(?:export-analytics-summary|export-revenuecat-summary|export-sentry-summary|export-coolify-summary|export-asc-summary)\.mjs(?:\s|$)/.test(
+  return /(?:^|\s)(?:node\s+)?(?:\S*\/)?(?:export-analytics-summary|export-revenuecat-summary|export-paddle-summary|export-seo-summary|export-sentry-summary|export-coolify-summary|export-asc-summary)\.mjs(?:\s|$)/.test(
     String(command || ''),
   );
 }
 
 function commandSupportsActiveConfig(command) {
-  return /(?:^|\s)(?:node\s+)?(?:\S*\/)?export-sentry-summary\.mjs(?:\s|$)/.test(
+  return /(?:^|\s)(?:node\s+)?(?:\S*\/)?(?:export-sentry-summary|export-coolify-summary)\.mjs(?:\s|$)/.test(
     String(command || ''),
   );
 }
@@ -672,6 +672,7 @@ function getConnectorEntries(statusPayload) {
     status: String(value?.status || 'unknown'),
     detail: String(value?.detail || ''),
     nextAction: typeof value?.nextAction === 'string' ? value.nextAction : null,
+    accounts: Array.isArray(value?.accounts) ? value.accounts : [],
   }));
 }
 
@@ -721,6 +722,18 @@ function buildConnectorWizardCommand(configPath, entry) {
   return `npx -y @analyticscli/growth-engineer@preview wizard --connectors ${quote(connector)}`;
 }
 
+function conciseConnectorDetail(entry) {
+  const detail = String(entry?.detail || '').replace(/\s+/g, ' ').trim();
+  if (/SENTRY_AUTH_TOKEN is required|SENTRY_AUTH_TOKEN.*missing/i.test(detail)) {
+    return 'SENTRY_AUTH_TOKEN missing for source collection.';
+  }
+  if (/source .*disabled|still disabled/i.test(detail)) {
+    return 'source is still disabled after setup.';
+  }
+  if (!detail) return 'needs attention.';
+  return detail.length > 180 ? `${detail.slice(0, 177)}...` : detail;
+}
+
 function isAscWebAuthIssue(entry) {
   if (entry.key !== 'appStoreConnect') return false;
   const text = `${entry.detail || ''}\n${entry.nextAction || ''}`.toLowerCase();
@@ -735,60 +748,69 @@ function isAscWebAuthIssue(entry) {
 
 function buildConnectorHealthAlert(statusPayload, unhealthyConnectors) {
   const configPath = statusPayload?.configPath || DEFAULT_CONFIG_PATH;
-  const lines = [
-    `OpenClaw Growth connector health needs attention (${new Date().toISOString()}).`,
-    `Config: ${configPath}`,
-    '',
-    'Unhealthy connector(s):',
-  ];
+  const lines = [`OpenClaw connector health: ${unhealthyConnectors.length} issue(s)`];
 
   for (const entry of unhealthyConnectors) {
-    lines.push(`- ${humanConnectorName(entry.key)}: ${entry.status} - ${entry.detail}`);
-    if (entry.nextAction) {
-      lines.push(`  Next: ${entry.nextAction}`);
-    }
+    lines.push(`- ${humanConnectorName(entry.key)}: ${entry.status} - ${conciseConnectorDetail(entry)}`);
     const command = buildConnectorWizardCommand(configPath, entry);
     if (command) {
-      lines.push('  Run on the host terminal:');
-      lines.push(`  \`${command}\``);
+      lines.push(`  Fix: \`${command}\``);
     }
     if (isAscWebAuthIssue(entry)) {
-      lines.push('  ASC web-auth refresh only:');
-      lines.push('  `ASC_WEB_APPLE_ID="<apple-id>" asc web auth login --apple-id "$ASC_WEB_APPLE_ID"`');
-      lines.push('  Do not rerun the API-key ASC wizard unless the API-key smoke test also fails.');
-    }
-    if (entry.key === 'appStoreConnect' && entry.status === 'partial') {
-      lines.push(
-        '  Note: ASC uses API-key batch reports by default. Experimental ASC web analytics should only be requested when a needed metric is unavailable through API reports.',
-      );
+      lines.push('  ASC web-auth only: `ASC_WEB_APPLE_ID="<apple-id>" asc web auth login --apple-id "$ASC_WEB_APPLE_ID"`');
     }
   }
 
-  lines.push('');
-  lines.push('Do not send secrets through chat or social channels. Refresh credentials only in the host terminal or secret store.');
+  lines.push('Secrets stay in the host terminal or secret store.');
   return `${lines.join('\n')}\n`;
 }
 
 function sourceFailureConnectorKey(failure) {
   const service = String(failure?.service || '').toLowerCase();
   const key = String(failure?.key || '').toLowerCase();
+  const source = String(failure?.source || '').toLowerCase();
   if (service.includes('sentry') || key === 'glitchtip') return 'sentry';
+  if (source === 'sentry' || source === 'glitchtip') return 'sentry';
   if (service.includes('revenuecat')) return 'revenuecat';
+  if (service.includes('paddle')) return 'paddle';
+  if (service.includes('seo') || service.includes('gsc') || service.includes('search-console') || service.includes('dataforseo')) return 'seo';
+  if (key === 'paddle') return 'paddle';
+  if (key === 'seo') return 'seo';
   if (service.includes('coolify')) return 'coolify';
   if (service.includes('github')) return 'github';
   if (key === 'analytics') return 'analyticscli';
   return String(failure?.key || 'source');
 }
 
-function buildSourceFailureStatusPayload(configPath, sourceFailures) {
+function getSentryAccountTargets(config) {
+  const accounts = Array.isArray(config?.sources?.sentry?.accounts) ? config.sources.sentry.accounts : [];
+  if (accounts.length === 0) return [];
+  return accounts.map((account, index) => ({
+    id: String(account?.id || account?.key || account?.label || `sentry_${index + 1}`)
+      .trim()
+      .replace(/[^a-zA-Z0-9._-]+/g, '_'),
+    label: String(account?.label || account?.name || account?.id || `Sentry ${index + 1}`).trim(),
+    baseUrl: String(account?.baseUrl || account?.base_url || account?.url || 'https://sentry.io').trim(),
+    org: String(account?.org || account?.organization || '').trim(),
+    projects: Array.isArray(account?.projects)
+      ? account.projects.map((project) => String(typeof project === 'string' ? project : project?.project || project?.slug || '').trim()).filter(Boolean)
+      : account?.project
+        ? [String(account.project).trim()].filter(Boolean)
+        : [],
+    environment: String(account?.environment || process.env.SENTRY_ENVIRONMENT || 'production').trim(),
+  }));
+}
+
+function buildSourceFailureStatusPayload(configPath, sourceFailures, config = null) {
   const connectors = {};
   for (const failure of sourceFailures) {
     const key = sourceFailureConnectorKey(failure);
     const detail = `Source collection failed during scheduled run: ${failure.detail}`;
-    const retryable = Boolean(failure.retryable);
+    const retryable = Boolean(failure.retryable || failure.transient);
     connectors[key] = {
       status: 'partial',
       detail,
+      accounts: key === 'sentry' ? getSentryAccountTargets(config) : [],
       nextAction: retryable
         ? 'Provider returned a transient upstream/network error after retry. Rerun the Growth Engineer later; if it repeats, check the provider status page and connector credentials.'
         : 'Run the connector wizard or source command on the host terminal and fix the reported source error.',
@@ -812,7 +834,7 @@ async function recordSourceCollectionFailures({ config, configPath, state, state
 
   const healthState = state?.connectorHealth || {};
   const checkedAt = new Date().toISOString();
-  const statusPayload = buildSourceFailureStatusPayload(configPath, sourceFailures);
+  const statusPayload = buildSourceFailureStatusPayload(configPath, sourceFailures, config);
   const unhealthyConnectors = getUnhealthyConfiguredConnectors(statusPayload);
   const fingerprint = buildConnectorHealthFingerprint(unhealthyConnectors);
   const previousExternallyDeliveredFingerprint = healthState.lastExternalAlertedFingerprint || null;
@@ -824,7 +846,7 @@ async function recordSourceCollectionFailures({ config, configPath, state, state
     lastStatusOk: false,
     lastFingerprint: fingerprint,
     activeIncidentFingerprint: fingerprint,
-    lastError: sourceFailures.map((failure) => `${failure.key}: ${failure.detail}`).join('\n'),
+    lastError: sourceFailures.map((failure) => `${failure.key || failure.source}: ${failure.detail}`).join('\n'),
   };
 
   if (previousExternallyDeliveredFingerprint !== fingerprint) {
@@ -1175,9 +1197,8 @@ function buildGrowthRunSummaryMessage({ issuesPayload, activeCadences, sourceFil
     ];
     if (issueCount > 0) {
       lines.push('Top:');
-      for (const issue of issues.slice(0, 4)) {
-        const evidence = firstEvidenceLines(issue, 1)[0];
-        lines.push(`- ${issue.title}${evidence ? ` - ${evidence}` : ''}`);
+      for (const issue of issues.slice(0, 3)) {
+        lines.push(`- ${issue.title}`);
       }
       lines.push(
         createdGitHubArtifact
@@ -1609,6 +1630,12 @@ async function runAnalyzer({
   if (sourceFiles.revenuecat) {
     args.push('--revenuecat', sourceFiles.revenuecat);
   }
+  if (sourceFiles.paddle) {
+    args.push('--source', `paddle=${sourceFiles.paddle}`);
+  }
+  if (sourceFiles.seo) {
+    args.push('--source', `seo=${sourceFiles.seo}`);
+  }
   if (sourceFiles.sentry) {
     args.push('--sentry', sourceFiles.sentry);
   }
@@ -1789,8 +1816,12 @@ async function resolveSourcePayloadWithCursor(sourceConfig, sourceName, cursorSt
           nextCursor: cursorState || null,
           resolvedCommand,
           failure: {
+            key: sourceName,
+            label: sourceConfig.label || sourceName,
+            service: sourceConfig.service || sourceName,
             source: sourceName,
             transient: true,
+            retryable: true,
             retried: true,
             at: new Date().toISOString(),
             detail,

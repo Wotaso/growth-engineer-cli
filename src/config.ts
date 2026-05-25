@@ -157,6 +157,14 @@ const secretsSchema = z
     analyticsTokenRef: secretRefSchema.optional(),
     revenuecatTokenEnv: z.string().default('REVENUECAT_API_KEY'),
     revenuecatTokenRef: secretRefSchema.optional(),
+    paddleTokenEnv: z.string().default('PADDLE_API_KEY'),
+    paddleTokenRef: secretRefSchema.optional(),
+    gscTokenEnv: z.string().default('GOOGLE_SEARCH_CONSOLE_ACCESS_TOKEN'),
+    gscTokenRef: secretRefSchema.optional(),
+    dataforseoLoginEnv: z.string().default('DATAFORSEO_LOGIN'),
+    dataforseoLoginRef: secretRefSchema.optional(),
+    dataforseoPasswordEnv: z.string().default('DATAFORSEO_PASSWORD'),
+    dataforseoPasswordRef: secretRefSchema.optional(),
     sentryTokenEnv: z.string().default('SENTRY_AUTH_TOKEN'),
     sentryTokenRef: secretRefSchema.optional(),
     coolifyTokenEnv: z.string().default('COOLIFY_API_TOKEN'),
@@ -210,6 +218,8 @@ const templateConfigSchema = z.object({
     .object({
       analytics: sourceSchema.default({ enabled: true, mode: 'command' }),
       revenuecat: sourceSchema.default({ enabled: false, mode: 'file' }),
+      paddle: sourceSchema.default({ enabled: false, mode: 'command' }),
+      seo: sourceSchema.default({ enabled: false, mode: 'command' }),
       sentry: sourceSchema.default({ enabled: false, mode: 'file' }),
       coolify: sourceSchema.default({ enabled: false, mode: 'command' }),
       feedback: sourceSchema.default({
@@ -262,6 +272,8 @@ export type LegacyGrowthConfig = {
   sources: {
     analytics: z.infer<typeof sourceSchema>;
     revenuecat: z.infer<typeof sourceSchema>;
+    paddle: z.infer<typeof sourceSchema>;
+    seo: z.infer<typeof sourceSchema>;
     sentry: z.infer<typeof sourceSchema>;
     coolify: z.infer<typeof sourceSchema>;
     feedback: z.infer<typeof sourceSchema>;
@@ -344,6 +356,8 @@ export const toLegacyGrowthConfig = (
     sources: {
       analytics: absolutizeSource(baseDir, config.sources.analytics),
       revenuecat: absolutizeSource(baseDir, config.sources.revenuecat),
+      paddle: absolutizeSource(baseDir, config.sources.paddle),
+      seo: absolutizeSource(baseDir, config.sources.seo),
       sentry: absolutizeSource(baseDir, config.sources.sentry),
       coolify: absolutizeSource(baseDir, config.sources.coolify),
       feedback: absolutizeSource(baseDir, config.sources.feedback),

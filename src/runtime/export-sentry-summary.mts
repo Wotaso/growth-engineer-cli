@@ -256,6 +256,24 @@ function requireValue(value, label) {
   return normalized;
 }
 
+function describeAccountTarget(account) {
+  const parts = [
+    account.label || account.accountId || account.id || 'Sentry',
+    account.accountId || account.id ? `id=${account.accountId || account.id}` : null,
+    `baseUrl=${account.baseUrl || DEFAULT_BASE_URL}`,
+    account.org ? `org=${account.org}` : null,
+    account.project ? `project=${account.project}` : null,
+    account.environment ? `environment=${account.environment}` : null,
+    account.tokenEnv ? `tokenEnv=${account.tokenEnv}` : null,
+  ].filter(Boolean);
+  return parts.join(' ');
+}
+
+function withAccountTargetError(error, account, action) {
+  const detail = error instanceof Error ? error.message : String(error);
+  return new Error(`${action} failed for ${describeAccountTarget(account)}: ${detail}`);
+}
+
 function buildUrl(baseUrl, pathname, params) {
   const url = new URL(pathname, `${baseUrl.replace(/\/$/, '')}/`);
   for (const [key, value] of Object.entries(params)) {
@@ -342,16 +360,20 @@ function redactData(value) {
 }
 
 async function listIssues(account, token) {
-  const org = encodeURIComponent(requireValue(account.org, 'SENTRY_ORG'));
-  const project = encodeURIComponent(requireValue(account.project, 'SENTRY_PROJECT'));
-  const url = buildUrl(account.baseUrl || DEFAULT_BASE_URL, `/api/0/projects/${org}/${project}/issues/`, {
-    statsPeriod: account.last,
-    environment: account.environment,
-    query: account.query,
-    per_page: account.limit,
-  });
-  const payload = await sentryFetchJson(url, token);
-  return Array.isArray(payload) ? payload : [];
+  try {
+    const org = encodeURIComponent(requireValue(account.org, 'SENTRY_ORG'));
+    const project = encodeURIComponent(requireValue(account.project, 'SENTRY_PROJECT'));
+    const url = buildUrl(account.baseUrl || DEFAULT_BASE_URL, `/api/0/projects/${org}/${project}/issues/`, {
+      statsPeriod: account.last,
+      environment: account.environment,
+      query: account.query,
+      per_page: account.limit,
+    });
+    const payload = await sentryFetchJson(url, token);
+    return Array.isArray(payload) ? payload : [];
+  } catch (error) {
+    throw withAccountTargetError(error, account, 'Sentry issue fetch');
+  }
 }
 
 async function main() {
@@ -364,12 +386,16 @@ async function main() {
   }
   const accounts = [];
   for (const account of configuredAccounts) {
-    const token = requireValue(process.env[account.tokenEnv], account.tokenEnv);
-    accounts.push(...await expandDiscoveredProjects(account, token));
+    try {
+      const token = requireValue(process.env[account.tokenEnv], `${account.tokenEnv} for ${describeAccountTarget(account)}`);
+      accounts.push(...await expandDiscoveredProjects(account, token));
+    } catch (error) {
+      throw withAccountTargetError(error, account, 'Sentry project discovery');
+    }
   }
   const summaries = [];
   for (const account of accounts) {
-    const token = requireValue(process.env[account.tokenEnv], account.tokenEnv);
+    const token = requireValue(process.env[account.tokenEnv], `${account.tokenEnv} for ${describeAccountTarget(account)}`);
     const issuesPayload = redactData(await listIssues(account, token));
     summaries.push({
       id: account.id,

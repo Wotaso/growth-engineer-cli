@@ -1,6 +1,6 @@
 import path from 'node:path';
 
-const BUILTIN_SOURCE_NAMES = ['analytics', 'revenuecat', 'sentry', 'coolify', 'feedback'];
+const BUILTIN_SOURCE_NAMES = ['analytics', 'revenuecat', 'paddle', 'seo', 'sentry', 'coolify', 'feedback'];
 const DEFAULT_CONFIG_PATH = 'data/openclaw-growth-engineer/config.json';
 
 function quote(value) {
@@ -15,20 +15,36 @@ const SERVICE_KIND_ALIASES = {
   analytics: [
     'analytics',
     'analyticscli',
-    'mixpanel',
-    'amplitude',
-    'firebase',
-    'posthog',
     'telemetry',
   ],
-  revenue: ['revenuecat', 'stripe', 'purchases', 'billing', 'adapty', 'superwall'],
+  revenue: [
+    'revenuecat',
+    'paddle',
+    'stripe',
+    'lemonsqueezy',
+    'lemon-squeezy',
+    'purchases',
+    'billing',
+    'adapty',
+    'superwall',
+  ],
+  seo: [
+    'seo',
+    'gsc',
+    'google-search-console',
+    'search-console',
+    'dataforseo',
+    'organic-search',
+    'search',
+  ],
   crash: ['sentry', 'glitchtip', 'crashlytics', 'bugsnag', 'datadog', 'rollbar'],
-  infrastructure: ['coolify', 'deployment', 'deployments', 'hosting', 'infrastructure', 'infra'],
+  infrastructure: ['coolify', 'vercel', 'cloudflare', 'deployment', 'deployments', 'hosting', 'infrastructure', 'infra'],
   feedback: [
     'feedback',
     'support',
     'intercom',
     'zendesk',
+    'linear',
     'app-store-reviews',
     'app_store_reviews',
     'play-store-reviews',
@@ -43,8 +59,25 @@ const SERVICE_KIND_ALIASES = {
     'play_console',
     'google-play',
     'google_play',
+    'appfollow',
+    'app-follow',
+    'apptweak',
+    'app-tweak',
     'aso',
   ],
+  acquisition: [
+    'apple-search-ads',
+    'apple-ads',
+    'google-ads',
+    'meta-ads',
+    'facebook-ads',
+    'tiktok-ads',
+    'postiz',
+    'postiz-api',
+    'social-publishing',
+    'social-scheduler',
+  ],
+  lifecycle: ['resend', 'customerio', 'customer-io', 'mailchimp'],
 };
 
 export function getBuiltinSourceNames() {
@@ -86,6 +119,9 @@ export function getDefaultSourceHint(service) {
   if (kind === 'revenue') {
     return '- Revenue provider summary with monetization deltas, package/offering signals, and churn notes.\n- Command mode should output JSON in the shared signals[] shape.';
   }
+  if (kind === 'seo') {
+    return '- SEO/acquisition summary from Google Search Console, DataForSEO, or CSV exports.\n- Prefer GSC and cached CSVs; only use paid APIs with an explicit request cap.';
+  }
   if (kind === 'crash') {
     return '- Crash/error provider summary with top regressions, affected users, and issue evidence.\n- `issues[]` or shared `signals[]` payloads are both accepted.';
   }
@@ -98,6 +134,12 @@ export function getDefaultSourceHint(service) {
   if (kind === 'store') {
     return '- Store/distribution summary from ASC CLI, Play Console exports, or release tooling.\n- Focus on review trends, release blockers, ratings, and ASO signals.';
   }
+  if (kind === 'acquisition') {
+    return '- Paid acquisition summary with spend, conversions, CAC, ROAS, campaign quality, and channel movement.\n- Keep campaign/ad/account IDs discoverable instead of hard-coded when possible.';
+  }
+  if (kind === 'lifecycle') {
+    return '- Lifecycle messaging summary with sends, opens/clicks where relevant, bounces, complaints, journeys, campaigns, and conversion signals.\n- Prefer account/workspace-level summaries over individual campaign pins.';
+  }
   return '- Any connector is supported when it can produce JSON in the shared `signals[]` shape.\n- Use `issues[]` for crash tools or `items[]` for feedback-like tools when that fits better.';
 }
 
@@ -108,6 +150,18 @@ export function getDefaultSourceCommand(service) {
   }
   if (normalized === 'revenuecat' || normalized === 'revenue-cat' || normalized === 'rc') {
     return 'node scripts/export-revenuecat-summary.mjs';
+  }
+  if (normalized === 'paddle') {
+    return 'node scripts/export-paddle-summary.mjs';
+  }
+  if (
+    normalized === 'seo' ||
+    normalized === 'gsc' ||
+    normalized === 'google-search-console' ||
+    normalized === 'search-console' ||
+    normalized === 'dataforseo'
+  ) {
+    return 'node scripts/export-seo-summary.mjs';
   }
   if (normalized === 'sentry') {
     return 'node scripts/export-sentry-summary.mjs';

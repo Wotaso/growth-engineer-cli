@@ -50,6 +50,10 @@ function getConfiguredSecretRefs(config): Array<{ envName: string; ref: SecretRe
     ['githubTokenEnv', 'githubTokenRef', 'GITHUB_TOKEN'],
     ['analyticsTokenEnv', 'analyticsTokenRef', 'ANALYTICSCLI_ACCESS_TOKEN'],
     ['revenuecatTokenEnv', 'revenuecatTokenRef', 'REVENUECAT_API_KEY'],
+    ['paddleTokenEnv', 'paddleTokenRef', 'PADDLE_API_KEY'],
+    ['gscTokenEnv', 'gscTokenRef', 'GOOGLE_SEARCH_CONSOLE_ACCESS_TOKEN'],
+    ['dataforseoLoginEnv', 'dataforseoLoginRef', 'DATAFORSEO_LOGIN'],
+    ['dataforseoPasswordEnv', 'dataforseoPasswordRef', 'DATAFORSEO_PASSWORD'],
     ['sentryTokenEnv', 'sentryTokenRef', 'SENTRY_AUTH_TOKEN'],
     ['coolifyTokenEnv', 'coolifyTokenRef', 'COOLIFY_API_TOKEN'],
   ];

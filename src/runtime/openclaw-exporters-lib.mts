@@ -105,6 +105,22 @@ function buildRetentionQualityEvidence(retention) {
   return evidence;
 }
 
+function hasRetentionIdentityPersistenceGap(retention) {
+  const reliability = normalizeRetentionReliability(retention);
+  if (reliability !== 'low' && reliability !== 'unknown') {
+    return false;
+  }
+  const stableShare = coerceNumber(retention?.quality?.stableIdentityShare);
+  const multiSessionShare = coerceNumber(retention?.quality?.multiSessionShare);
+  if (stableShare !== null && stableShare >= 0.5) {
+    return false;
+  }
+  if (multiSessionShare !== null && multiSessionShare >= 0.2) {
+    return false;
+  }
+  return true;
+}
+
 function maybePushSignal(signals, signal) {
   if (!signal) return;
   signals.push(signal);
@@ -252,44 +268,69 @@ export function buildAnalyticsSummary(input) {
   const retentionHasLowConfidence =
     retentionReliability === 'low' || retentionReliability === 'unknown';
   const retentionQualityEvidence = buildRetentionQualityEvidence(retention);
+  const retentionIdentityPersistenceGap = hasRetentionIdentityPersistenceGap(retention);
 
   if (hasMinimumSample(retention?.cohortSize)) {
-    for (const target of retentionTargets) {
-      const actual = retentionByDay.get(target.day);
-      if (actual === undefined || actual >= target.baseline) {
-        continue;
-      }
-
+    if (retentionIdentityPersistenceGap) {
       maybePushSignal(signals, {
-        id: `retention_d${target.day}_below_target`,
-        title: retentionHasLowConfidence
-          ? `Day-${target.day} retention appears below target, but identity quality is low`
-          : `Day-${target.day} retention is below target`,
-        area: 'retention',
-        priority: retentionHasLowConfidence ? 'medium' : target.day >= 3 ? 'high' : 'medium',
-        metric: `d${target.day}_retention`,
-        current_value: round(actual),
-        baseline_value: target.baseline,
-        delta_percent: computeDeltaPercent(actual, target.baseline),
+        id: 'analytics_identity_persistence_missing',
+        title: 'Analytics identity persistence is missing; D7 retention is not reliable',
+        area: 'analytics_anomaly',
+        priority: 'high',
+        metric: 'retention_identity_quality',
+        current_value: coerceNumber(retention?.quality?.stableIdentityShare) || 0,
+        baseline_value: 0.5,
+        delta_percent: computeDeltaPercent(coerceNumber(retention?.quality?.stableIdentityShare) || 0, 0.5),
         evidence: [
           `Retention cohort size: ${retention.cohortSize}`,
-          `Observed D${target.day} retention: ${(actual * 100).toFixed(2)}%`,
           ...retentionQualityEvidence,
-          retention?.avgActiveDays !== undefined
-            ? `Average active days in the cohort: ${retention.avgActiveDays}`
-            : null,
+          'D1/D7 retention is suppressed from product findings until the host app persists a stable SDK identity.',
         ].filter(Boolean),
         suggested_actions: [
-          retentionHasLowConfidence
-            ? 'Verify SDK identity persistence and rerun retention with stable identity filtering before treating D1/D7 as a product fact'
-            : null,
-          'Revisit the first-session value loop and ensure the core action completes quickly',
-          'Add targeted re-entry prompts or reminders after the first session',
-          'Instrument the major early-session drop-off points to isolate which step drives the retention loss',
-        ].filter(Boolean),
-        keywords: ['retention', 'engagement', 'activation', `d${target.day}`],
+          'Enable persistent AnalyticsCLI SDK identity in the host app before evaluating D1/D7 retention',
+          'Verify new release events carry identityQuality=persistent or identified instead of ephemeral or unknown',
+          'Rerun retention after at least one cohort has stable identity coverage',
+        ],
+        keywords: ['analyticscli', 'identity', 'persistence', 'retention', 'd7'],
       });
-      break;
+    } else {
+      for (const target of retentionTargets) {
+        const actual = retentionByDay.get(target.day);
+        if (actual === undefined || actual >= target.baseline) {
+          continue;
+        }
+
+        maybePushSignal(signals, {
+          id: `retention_d${target.day}_below_target`,
+          title: retentionHasLowConfidence
+            ? `Day-${target.day} retention appears below target, but identity quality is low`
+            : `Day-${target.day} retention is below target`,
+          area: 'retention',
+          priority: retentionHasLowConfidence ? 'medium' : target.day >= 3 ? 'high' : 'medium',
+          metric: `d${target.day}_retention`,
+          current_value: round(actual),
+          baseline_value: target.baseline,
+          delta_percent: computeDeltaPercent(actual, target.baseline),
+          evidence: [
+            `Retention cohort size: ${retention.cohortSize}`,
+            `Observed D${target.day} retention: ${(actual * 100).toFixed(2)}%`,
+            ...retentionQualityEvidence,
+            retention?.avgActiveDays !== undefined
+              ? `Average active days in the cohort: ${retention.avgActiveDays}`
+              : null,
+          ].filter(Boolean),
+          suggested_actions: [
+            retentionHasLowConfidence
+              ? 'Verify SDK identity persistence and rerun retention with stable identity filtering before treating D1/D7 as a product fact'
+              : null,
+            'Revisit the first-session value loop and ensure the core action completes quickly',
+            'Add targeted re-entry prompts or reminders after the first session',
+            'Instrument the major early-session drop-off points to isolate which step drives the retention loss',
+          ].filter(Boolean),
+          keywords: ['retention', 'engagement', 'activation', `d${target.day}`],
+        });
+        break;
+      }
     }
   }
 
@@ -1208,6 +1249,420 @@ export function buildRevenueCatSummary(input) {
       offeringsCount: offerings.length,
       entitlementsCount: entitlements.length,
       metricsCount: metrics.length,
+      warnings,
+    },
+  };
+}
+
+function metricSeries(payload) {
+  if (Array.isArray(payload?.data?.timeseries)) return payload.data.timeseries;
+  if (Array.isArray(payload?.timeseries)) return payload.timeseries;
+  return [];
+}
+
+function metricCurrency(payload) {
+  return String(payload?.data?.currency_code || payload?.currency_code || '').trim();
+}
+
+function metricUpdatedAt(payload) {
+  return String(payload?.data?.updated_at || payload?.updated_at || '').trim();
+}
+
+function amountValue(value) {
+  const numeric = coerceNumber(value);
+  return numeric === null ? 0 : numeric;
+}
+
+function sumAmounts(series) {
+  return series.reduce((total, point) => total + amountValue(point?.amount), 0);
+}
+
+function sumCounts(series, key = 'count') {
+  return series.reduce((total, point) => total + (coerceNumber(point?.[key]) || 0), 0);
+}
+
+function firstLastNumeric(series, key) {
+  const values = series
+    .map((point) => coerceNumber(point?.[key]))
+    .filter((value) => value !== null);
+  if (values.length === 0) return { first: null, last: null, deltaPercent: null };
+  const first = values[0];
+  const last = values[values.length - 1];
+  return {
+    first,
+    last,
+    deltaPercent: computeDeltaPercent(last, first),
+  };
+}
+
+function formatMinorCurrency(amount, currencyCode) {
+  const currency = String(currencyCode || '').trim().toUpperCase();
+  const value = amountValue(amount) / 100;
+  if (!currency) return String(value);
+  try {
+    return new Intl.NumberFormat('en-US', { style: 'currency', currency }).format(value);
+  } catch {
+    return `${value.toFixed(2)} ${currency}`;
+  }
+}
+
+export function buildPaddleSummary(input) {
+  const revenue = input?.metrics?.revenue || null;
+  const mrr = input?.metrics?.monthlyRecurringRevenue || null;
+  const activeSubscribers = input?.metrics?.activeSubscribers || null;
+  const refunds = input?.metrics?.refunds || null;
+  const chargebacks = input?.metrics?.chargebacks || null;
+  const checkoutConversion = input?.metrics?.checkoutConversion || null;
+  const warnings = Array.isArray(input?.warnings) ? input.warnings.filter(Boolean).map(String) : [];
+  const window = String(input?.window || 'last_30d');
+  const currency = metricCurrency(revenue) || metricCurrency(mrr) || metricCurrency(refunds) || '';
+  const revenueSeries = metricSeries(revenue);
+  const mrrSeries = metricSeries(mrr);
+  const subscriberSeries = metricSeries(activeSubscribers);
+  const refundSeries = metricSeries(refunds);
+  const chargebackSeries = metricSeries(chargebacks);
+  const checkoutSeries = metricSeries(checkoutConversion);
+  const signals = [];
+
+  const totalRevenue = sumAmounts(revenueSeries);
+  const transactionCount = sumCounts(revenueSeries);
+  if (revenueSeries.length > 0) {
+    const midpoint = Math.floor(revenueSeries.length / 2);
+    const firstHalf = sumAmounts(revenueSeries.slice(0, midpoint || revenueSeries.length));
+    const secondHalf = midpoint > 0 ? sumAmounts(revenueSeries.slice(midpoint)) : totalRevenue;
+    const delta = midpoint > 0 ? computeDeltaPercent(secondHalf, firstHalf) : null;
+    maybePushSignal(signals, {
+      id: 'paddle_revenue_trend',
+      title: delta !== null && delta < -20 ? 'Paddle revenue dropped versus the prior part of the window' : 'Paddle revenue metrics are connected',
+      area: 'revenue',
+      priority: delta !== null && delta < -20 ? 'high' : totalRevenue > 0 ? 'medium' : 'low',
+      metric: 'paddle_revenue',
+      current_value: totalRevenue,
+      baseline_value: firstHalf || null,
+      delta_percent: delta,
+      evidence: [
+        `Revenue in window: ${formatMinorCurrency(totalRevenue, currency)}`,
+        `Completed payment count: ${transactionCount}`,
+        delta !== null ? `Recent-half revenue delta: ${delta}%` : null,
+      ].filter(Boolean),
+      suggested_actions: [
+        'Compare Paddle revenue movement with AnalyticsCLI checkout and activation funnels',
+        'Segment revenue movement by recent releases, traffic sources, and pricing page changes before changing pricing',
+      ],
+      keywords: ['paddle', 'revenue', 'checkout', 'billing'],
+      confidence: transactionCount > 0 ? 'high' : 'medium',
+    });
+  }
+
+  const mrrTrend = firstLastNumeric(mrrSeries, 'amount');
+  if (mrrTrend.last !== null) {
+    maybePushSignal(signals, {
+      id: 'paddle_mrr_trend',
+      title: mrrTrend.deltaPercent !== null && mrrTrend.deltaPercent < -10 ? 'Paddle MRR is contracting' : 'Paddle MRR is available for subscription analysis',
+      area: mrrTrend.deltaPercent !== null && mrrTrend.deltaPercent < -10 ? 'retention' : 'revenue',
+      priority: mrrTrend.deltaPercent !== null && mrrTrend.deltaPercent < -10 ? 'high' : 'medium',
+      metric: 'paddle_mrr',
+      current_value: mrrTrend.last,
+      baseline_value: mrrTrend.first,
+      delta_percent: mrrTrend.deltaPercent,
+      evidence: [
+        `MRR start: ${formatMinorCurrency(mrrTrend.first, currency)}`,
+        `MRR end: ${formatMinorCurrency(mrrTrend.last, currency)}`,
+        mrrTrend.deltaPercent !== null ? `MRR delta: ${mrrTrend.deltaPercent}%` : null,
+      ].filter(Boolean),
+      suggested_actions: [
+        'Investigate churn, failed renewals, and downgrade timing before adding acquisition spend',
+        'Pair MRR changes with product usage cohorts to find whether contraction follows activation or value-delivery gaps',
+      ],
+      keywords: ['paddle', 'mrr', 'subscription', 'retention'],
+      confidence: 'high',
+    });
+  }
+
+  const subscriberTrend = firstLastNumeric(subscriberSeries, 'count');
+  if (subscriberTrend.last !== null) {
+    maybePushSignal(signals, {
+      id: 'paddle_active_subscribers_trend',
+      title: subscriberTrend.deltaPercent !== null && subscriberTrend.deltaPercent < -10 ? 'Paddle active subscribers declined' : 'Paddle active subscriber count is connected',
+      area: subscriberTrend.deltaPercent !== null && subscriberTrend.deltaPercent < -10 ? 'retention' : 'revenue',
+      priority: subscriberTrend.deltaPercent !== null && subscriberTrend.deltaPercent < -10 ? 'high' : 'medium',
+      metric: 'paddle_active_subscribers',
+      current_value: subscriberTrend.last,
+      baseline_value: subscriberTrend.first,
+      delta_percent: subscriberTrend.deltaPercent,
+      evidence: [
+        `Active subscribers start: ${subscriberTrend.first}`,
+        `Active subscribers end: ${subscriberTrend.last}`,
+        subscriberTrend.deltaPercent !== null ? `Subscriber delta: ${subscriberTrend.deltaPercent}%` : null,
+      ].filter(Boolean),
+      suggested_actions: [
+        'Compare subscriber movement with onboarding completion, activation, and cancellation feedback',
+        'Check whether acquisition quality or pricing page changes shifted subscriber mix',
+      ],
+      keywords: ['paddle', 'subscribers', 'subscription', 'retention'],
+      confidence: 'high',
+    });
+  }
+
+  const totalRefunds = sumAmounts(refundSeries);
+  const totalChargebacks = sumCounts(chargebackSeries) || sumAmounts(chargebackSeries);
+  if (totalRefunds > 0 || totalChargebacks > 0) {
+    maybePushSignal(signals, {
+      id: 'paddle_refunds_or_chargebacks_visible',
+      title: 'Paddle reports refunds or chargebacks',
+      area: 'revenue',
+      priority: totalChargebacks > 0 || totalRefunds >= totalRevenue * 0.1 ? 'high' : 'medium',
+      metric: 'paddle_refunds_chargebacks',
+      current_value: totalRefunds + totalChargebacks,
+      baseline_value: 0,
+      delta_percent: 100,
+      evidence: [
+        `Refund amount: ${formatMinorCurrency(totalRefunds, currency)}`,
+        `Chargebacks/count signal: ${totalChargebacks}`,
+      ],
+      suggested_actions: [
+        'Review refund reasons and payment disputes before scaling acquisition',
+        'Compare refund timing with product promise, onboarding quality, and checkout copy',
+      ],
+      keywords: ['paddle', 'refunds', 'chargebacks', 'revenue'],
+      confidence: 'medium',
+    });
+  }
+
+  if (checkoutSeries.length > 0) {
+    const latest = checkoutSeries[checkoutSeries.length - 1] || {};
+    const rate = coerceNumber(latest.rate);
+    const started = coerceNumber(latest.count);
+    const completed = coerceNumber(latest.completed_count ?? latest.completedCount);
+    if (rate !== null || started !== null || completed !== null) {
+      maybePushSignal(signals, {
+        id: 'paddle_checkout_conversion',
+        title: rate !== null && rate < 0.05 ? 'Paddle checkout conversion is low' : 'Paddle checkout conversion is measurable',
+        area: 'conversion',
+        priority: rate !== null && rate < 0.05 ? 'high' : 'medium',
+        metric: 'paddle_checkout_conversion',
+        current_value: rate,
+        baseline_value: null,
+        delta_percent: null,
+        evidence: [
+          rate !== null ? `Latest checkout conversion rate: ${(rate * 100).toFixed(2)}%` : null,
+          started !== null ? `Latest checkout sessions: ${started}` : null,
+          completed !== null ? `Latest completed checkouts: ${completed}` : null,
+        ].filter(Boolean),
+        suggested_actions: [
+          'Inspect checkout abandonment by plan, geography, and device before changing the paywall',
+          'Cross-check pricing page CTA clicks against Paddle checkout starts and completions',
+        ],
+        keywords: ['paddle', 'checkout', 'conversion', 'pricing'],
+        confidence: 'medium',
+      });
+    }
+  }
+
+  if (warnings.length > 0) {
+    maybePushSignal(signals, {
+      id: 'paddle_api_partial_read',
+      title: 'Paddle metrics summary is partial',
+      area: 'general',
+      priority: 'low',
+      metric: 'paddle_api_warnings',
+      current_value: warnings.length,
+      evidence: warnings.slice(0, 8),
+      suggested_actions: [
+        'Verify the Paddle API key has metrics.read permission on the live account',
+        'Keep sandbox and live keys separate; Paddle metrics endpoints are intended for live account reporting',
+      ],
+      keywords: ['paddle', 'api', 'metrics', 'permissions'],
+      confidence: 'medium',
+    });
+  }
+
+  return {
+    project: 'paddle',
+    window,
+    metrics: input?.metrics || {},
+    signals: sortSignals(signals).slice(0, Math.max(1, Number(input?.maxSignals) || 6)),
+    meta: {
+      generatedAt: new Date().toISOString(),
+      source: 'paddle',
+      environment: input?.environment || 'live',
+      currencyCode: currency || null,
+      updatedAt: [
+        metricUpdatedAt(revenue),
+        metricUpdatedAt(mrr),
+        metricUpdatedAt(activeSubscribers),
+        metricUpdatedAt(refunds),
+        metricUpdatedAt(chargebacks),
+        metricUpdatedAt(checkoutConversion),
+      ].filter(Boolean)[0] || null,
+      warnings,
+    },
+  };
+}
+
+function seoNumber(value) {
+  const numeric = coerceNumber(value);
+  return numeric === null ? 0 : numeric;
+}
+
+function normalizeSeoRow(row) {
+  const keys = Array.isArray(row?.keys) ? row.keys.map((value) => String(value || '').trim()) : [];
+  const query = String(row?.query || row?.keyword || keys[0] || '').trim();
+  const page = String(row?.page || row?.url || keys[1] || '').trim();
+  return {
+    query,
+    page,
+    clicks: seoNumber(row?.clicks),
+    impressions: seoNumber(row?.impressions),
+    ctr: coerceNumber(row?.ctr) ?? null,
+    position: coerceNumber(row?.position) ?? null,
+    volume: coerceNumber(row?.volume ?? row?.search_volume) ?? null,
+    difficulty: coerceNumber(row?.difficulty ?? row?.keyword_difficulty ?? row?.competition_index) ?? null,
+    cpc: coerceNumber(row?.cpc) ?? null,
+    source: String(row?.source || 'seo').trim(),
+  };
+}
+
+function seoCtr(row) {
+  if (row.ctr !== null) return row.ctr;
+  return row.impressions > 0 ? row.clicks / row.impressions : 0;
+}
+
+function seoLabel(row) {
+  return [row.query, row.page].filter(Boolean).join(' -> ') || row.query || row.page || 'unknown';
+}
+
+export function buildSeoSummary(input) {
+  const rows = Array.isArray(input?.rows) ? input.rows.map(normalizeSeoRow) : [];
+  const keywordRows = Array.isArray(input?.keywordRows) ? input.keywordRows.map(normalizeSeoRow) : [];
+  const warnings = Array.isArray(input?.warnings) ? input.warnings.filter(Boolean).map(String) : [];
+  const maxSignals = Math.max(1, Number(input?.maxSignals) || 8);
+  const signals = [];
+
+  const gscRows = rows.filter((row) => row.impressions > 0);
+  const lowCtr = [...gscRows]
+    .filter((row) => row.impressions >= 100 && seoCtr(row) < 0.02)
+    .sort((a, b) => b.impressions - a.impressions)
+    .slice(0, 5);
+  if (lowCtr.length > 0) {
+    maybePushSignal(signals, {
+      id: 'seo_gsc_high_impression_low_ctr',
+      title: 'Google Search Console shows high-impression queries with low CTR',
+      area: 'marketing',
+      priority: lowCtr.some((row) => row.impressions >= 1000) ? 'high' : 'medium',
+      metric: 'gsc_low_ctr_impressions',
+      current_value: lowCtr.reduce((total, row) => total + row.impressions, 0),
+      baseline_value: null,
+      delta_percent: null,
+      evidence: lowCtr.map((row) => `${seoLabel(row)}: ${row.impressions} impressions, ${row.clicks} clicks, ${(seoCtr(row) * 100).toFixed(2)}% CTR, avg position ${row.position ?? 'n/a'}`),
+      suggested_actions: [
+        'Refresh title, meta description, and above-the-fold promise for the affected page/query pair',
+        'Check SERP intent and make the page answer the query more directly before creating new pages',
+      ],
+      keywords: ['seo', 'gsc', 'ctr', 'search-console'],
+      confidence: 'high',
+    });
+  }
+
+  const strikingDistance = [...gscRows]
+    .filter((row) => row.impressions >= 50 && row.position !== null && row.position >= 4 && row.position <= 20)
+    .sort((a, b) => b.impressions - a.impressions)
+    .slice(0, 5);
+  if (strikingDistance.length > 0) {
+    maybePushSignal(signals, {
+      id: 'seo_gsc_striking_distance_queries',
+      title: 'Google Search Console has striking-distance SEO opportunities',
+      area: 'marketing',
+      priority: strikingDistance.some((row) => row.position <= 10 && row.impressions >= 500) ? 'high' : 'medium',
+      metric: 'gsc_striking_distance_impressions',
+      current_value: strikingDistance.reduce((total, row) => total + row.impressions, 0),
+      baseline_value: null,
+      delta_percent: null,
+      evidence: strikingDistance.map((row) => `${seoLabel(row)}: avg position ${row.position}, ${row.impressions} impressions, ${row.clicks} clicks`),
+      suggested_actions: [
+        'Improve the existing ranking URL first: intent match, internal links, comparison proof, and product-specific examples',
+        'Only create a new page if the current URL cannot satisfy the query intent without cannibalization',
+      ],
+      keywords: ['seo', 'gsc', 'ranking', 'content-refresh'],
+      confidence: 'high',
+    });
+  }
+
+  const keywordOpportunities = [...keywordRows]
+    .filter((row) => (row.volume || 0) >= 20)
+    .sort((a, b) => (b.volume || 0) - (a.volume || 0) || (a.difficulty || 100) - (b.difficulty || 100))
+    .slice(0, 5);
+  if (keywordOpportunities.length > 0) {
+    maybePushSignal(signals, {
+      id: 'seo_keyword_research_opportunities',
+      title: 'Keyword research found acquisition opportunities',
+      area: 'marketing',
+      priority: keywordOpportunities.some((row) => (row.volume || 0) >= 500) ? 'high' : 'medium',
+      metric: 'seo_keyword_volume',
+      current_value: keywordOpportunities.reduce((total, row) => total + (row.volume || 0), 0),
+      baseline_value: null,
+      delta_percent: null,
+      evidence: keywordOpportunities.map((row) => `${row.query}: volume ${row.volume ?? 'n/a'}, difficulty ${row.difficulty ?? 'n/a'}, CPC ${row.cpc ?? 'n/a'}, source ${row.source}`),
+      suggested_actions: [
+        'Map each keyword to an existing URL before creating new content',
+        'Prioritize BOF, comparison, integration, and template pages where the product can add unique evidence',
+      ],
+      keywords: ['seo', 'keyword-research', 'dataforseo', 'content'],
+      confidence: keywordOpportunities.some((row) => row.source.includes('dataforseo')) ? 'high' : 'medium',
+    });
+  }
+
+  if (gscRows.length === 0 && keywordRows.length === 0) {
+    maybePushSignal(signals, {
+      id: 'seo_no_search_data',
+      title: 'SEO connector has no search data yet',
+      area: 'marketing',
+      priority: 'low',
+      metric: 'seo_rows',
+      current_value: 0,
+      baseline_value: 1,
+      delta_percent: -100,
+      evidence: warnings.length > 0 ? warnings.slice(0, 5) : ['No GSC rows, keyword CSV rows, or DataForSEO rows were available.'],
+      suggested_actions: [
+        'Connect Google Search Console or provide a recent GSC/keyword CSV export',
+        'Use DataForSEO only after narrowing seed topics and setting a paid request cap',
+      ],
+      keywords: ['seo', 'gsc', 'dataforseo', 'setup'],
+      confidence: 'medium',
+    });
+  }
+
+  if (warnings.length > 0) {
+    maybePushSignal(signals, {
+      id: 'seo_partial_read',
+      title: 'SEO summary is partial',
+      area: 'marketing',
+      priority: 'low',
+      metric: 'seo_warnings',
+      current_value: warnings.length,
+      evidence: warnings.slice(0, 8),
+      suggested_actions: [
+        'Fix the missing SEO credential/export only if SEO is part of the active growth cadence',
+        'Prefer cached exports for repeatable analysis and bounded paid API usage',
+      ],
+      keywords: ['seo', 'gsc', 'dataforseo', 'credentials'],
+      confidence: 'medium',
+    });
+  }
+
+  return {
+    project: input?.siteUrl ? `seo:${input.siteUrl}` : 'seo',
+    window: input?.window || 'latest',
+    rows: gscRows.slice(0, 100),
+    keywordRows: keywordRows.slice(0, 100),
+    signals: sortSignals(signals).slice(0, maxSignals),
+    meta: {
+      generatedAt: new Date().toISOString(),
+      source: 'seo',
+      siteUrl: input?.siteUrl || null,
+      gscRows: gscRows.length,
+      keywordRows: keywordRows.length,
+      paidProvider: input?.paidProvider || null,
       warnings,
     },
   };

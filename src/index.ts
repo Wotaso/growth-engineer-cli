@@ -66,7 +66,7 @@ const analyticsCliNpmPrefix =
   (process.env.HOME ? join(process.env.HOME, '.local') : resolve(process.cwd(), '.analyticscli-npm'));
 const program = new Command();
 
-type ConnectorKey = 'github' | 'asc' | 'revenuecat' | 'coolify';
+type ConnectorKey = 'github' | 'asc' | 'revenuecat' | 'paddle' | 'seo' | 'coolify';
 
 type ConnectorInstallResult = {
   connector: ConnectorKey;
@@ -321,7 +321,8 @@ const ensureAnalyticsCliPackage = (): { ok: boolean; detail: string } => {
 
 const resolveRuntimeInvocation = (scriptName: string): { command: string; args: string[] } => {
   const sourcePath = resolve(packageRoot, 'src', 'runtime', `${scriptName}.mts`);
-  if (existsSync(sourcePath)) {
+  const runningFromSource = moduleDir === resolve(packageRoot, 'src') || moduleDir.startsWith(resolve(packageRoot, 'src') + '/');
+  if (runningFromSource && existsSync(sourcePath)) {
     return {
       command: 'tsx',
       args: [sourcePath],
@@ -389,7 +390,7 @@ const detectGitHubRepo = (cwd: string): string | null => {
   return parseGitHubRepoFromRemote(result.stdout.trim());
 };
 
-const resolveDefaultSourceCommand = (repoRoot: string, command: 'analytics' | 'asc' | 'feedback' | 'coolify'): string => {
+const resolveDefaultSourceCommand = (repoRoot: string, command: 'analytics' | 'asc' | 'feedback' | 'coolify' | 'paddle' | 'seo'): string => {
   if (command === 'analytics') {
     const repoScript = resolve(repoRoot, 'scripts', 'export-analytics-summary.mjs');
     return fileExists(repoScript)
@@ -403,6 +404,16 @@ const resolveDefaultSourceCommand = (repoRoot: string, command: 'analytics' | 'a
 
   if (command === 'coolify') {
     return growthEngineerNpxCommand('exporters coolify-summary');
+  }
+
+  if (command === 'paddle') {
+    const repoScript = resolve(repoRoot, 'scripts', 'export-paddle-summary.mjs');
+    return fileExists(repoScript) ? 'node scripts/export-paddle-summary.mjs' : 'openclaw exporters paddle-summary';
+  }
+
+  if (command === 'seo') {
+    const repoScript = resolve(repoRoot, 'scripts', 'export-seo-summary.mjs');
+    return fileExists(repoScript) ? 'node scripts/export-seo-summary.mjs' : 'openclaw exporters seo-summary';
   }
 
   const repoScript = resolve(repoRoot, 'scripts', 'export-asc-summary.mjs');
@@ -614,6 +625,14 @@ const normalizeConnectorKey = (value: string): ConnectorKey | 'all' | null => {
     return 'revenuecat';
   }
 
+  if (['paddle', 'paddle-billing', 'billing-metrics', 'web-revenue'].includes(normalized)) {
+    return 'paddle';
+  }
+
+  if (['seo', 'gsc', 'google-search-console', 'search-console', 'dataforseo', 'organic-search'].includes(normalized)) {
+    return 'seo';
+  }
+
   if (['coolify', 'coolify-api', 'deployment', 'deployments', 'hosting', 'infra', 'infrastructure'].includes(normalized)) {
     return 'coolify';
   }
@@ -631,7 +650,7 @@ const parseConnectorList = (value?: string): ConnectorKey[] => {
     const connector = normalizeConnectorKey(entry);
     if (!connector) {
       throw Object.assign(
-        new Error(`Unknown connector "${entry.trim()}". Use github, asc, revenuecat, coolify, or all.`),
+        new Error(`Unknown connector "${entry.trim()}". Use github, asc, revenuecat, paddle, seo, coolify, or all.`),
         { exitCode: 2 },
       );
     }
@@ -640,6 +659,8 @@ const parseConnectorList = (value?: string): ConnectorKey[] => {
       connectors.add('github');
       connectors.add('asc');
       connectors.add('revenuecat');
+      connectors.add('paddle');
+      connectors.add('seo');
       connectors.add('coolify');
     } else {
       connectors.add(connector);
@@ -857,6 +878,22 @@ const enableConnectorConfig = async (configPath: string, connectors: ConnectorKe
             enabled: true,
           }
         : config.sources.revenuecat,
+      paddle: connectors.includes('paddle')
+        ? {
+            ...config.sources.paddle,
+            enabled: true,
+            mode: 'command',
+            command: config.sources.paddle?.command || resolveDefaultSourceCommand(repoRoot, 'paddle'),
+          }
+        : config.sources.paddle,
+      seo: connectors.includes('seo')
+        ? {
+            ...config.sources.seo,
+            enabled: true,
+            mode: 'command',
+            command: config.sources.seo?.command || resolveDefaultSourceCommand(repoRoot, 'seo'),
+          }
+        : config.sources.seo,
       coolify: connectors.includes('coolify')
         ? {
             ...config.sources.coolify,
@@ -904,6 +941,22 @@ const installConnectorHelpers = async (
         ok: true,
         detail:
           'Coolify is configured through the npx wizard connector flow; create a read-only API token in Coolify Keys & Tokens / API tokens, then run `npx -y @analyticscli/growth-engineer@preview wizard --connectors coolify` to store COOLIFY_BASE_URL and COOLIFY_API_TOKEN locally',
+      };
+    }
+    if (connector === 'paddle') {
+      return {
+        connector: 'paddle',
+        ok: true,
+        detail:
+          'Paddle is configured through the npx wizard connector flow; create a Paddle API key with metrics.read permission, then run `npx -y @analyticscli/growth-engineer@preview wizard --connectors paddle` to store PADDLE_API_KEY locally',
+      };
+    }
+    if (connector === 'seo') {
+      return {
+        connector: 'seo',
+        ok: true,
+        detail:
+          'SEO is configured through the npx wizard connector flow; connect Google Search Console credentials or CSV exports, and add DataForSEO only with an explicit paid request cap',
       };
     }
     return installRevenueCatConnector();
@@ -1426,6 +1479,7 @@ exportersCommand
   .command('analytics-summary')
   .description('Export the default analytics summary JSON')
   .allowUnknownOption(true)
+  .allowExcessArguments(true)
   .action(() => {
     const result = runRuntime('export-analytics-summary', forwardedArgsAfter('analytics-summary'), {
       cwd: process.cwd(),
@@ -1442,6 +1496,7 @@ exportersCommand
   .command('asc-summary')
   .description('Export the default ASC summary JSON')
   .allowUnknownOption(true)
+  .allowExcessArguments(true)
   .action(() => {
     const result = runRuntime('export-asc-summary', forwardedArgsAfter('asc-summary'), {
       cwd: process.cwd(),
@@ -1458,8 +1513,43 @@ exportersCommand
   .command('coolify-summary')
   .description('Export the default Coolify deployment summary JSON')
   .allowUnknownOption(true)
+  .allowExcessArguments(true)
   .action(() => {
     const result = runRuntime('export-coolify-summary', forwardedArgsAfter('coolify-summary'), {
+      cwd: process.cwd(),
+      timeoutMs: 20 * 60_000,
+    });
+    process.stdout.write(result.stdout);
+    process.stderr.write(result.stderr);
+    if (!result.ok) {
+      process.exitCode = 1;
+    }
+  });
+
+exportersCommand
+  .command('paddle-summary')
+  .description('Export the default Paddle metrics summary JSON')
+  .allowUnknownOption(true)
+  .allowExcessArguments(true)
+  .action(() => {
+    const result = runRuntime('export-paddle-summary', forwardedArgsAfter('paddle-summary'), {
+      cwd: process.cwd(),
+      timeoutMs: 20 * 60_000,
+    });
+    process.stdout.write(result.stdout);
+    process.stderr.write(result.stderr);
+    if (!result.ok) {
+      process.exitCode = 1;
+    }
+  });
+
+exportersCommand
+  .command('seo-summary')
+  .description('Export the default SEO/GSC/DataForSEO summary JSON')
+  .allowUnknownOption(true)
+  .allowExcessArguments(true)
+  .action(() => {
+    const result = runRuntime('export-seo-summary', forwardedArgsAfter('seo-summary'), {
       cwd: process.cwd(),
       timeoutMs: 20 * 60_000,
     });
