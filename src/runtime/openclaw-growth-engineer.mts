@@ -271,9 +271,22 @@ function normalizeSignals(payload, source, service = source) {
 
   const result = [];
   const serviceKind = classifyServiceKind(service);
+  const normalizeApp = (item) =>
+    item?.app
+      ? String(item.app)
+      : item?.sourceProject
+        ? String(item.sourceProject)
+        : item?.project
+          ? String(item.project)
+          : payload.project
+            ? String(payload.project)
+            : null;
+  const normalizeSourceUrl = (item) =>
+    String(item?.sourceUrl || item?.source_url || item?.issueUrl || item?.issue_url || item?.permalink || '').trim();
 
   if (Array.isArray(payload.signals)) {
     for (const signal of payload.signals) {
+      const sourceUrl = normalizeSourceUrl(signal);
       result.push({
         source,
         id: String(signal.id || `${source}_${result.length + 1}`),
@@ -289,13 +302,15 @@ function normalizeSignals(payload, source, service = source) {
         baselineValue: coerceNumber(signal.baseline_value ?? signal.baselineValue),
         confidence: signal.confidence ? String(signal.confidence) : null,
         releaseVersions: toStringArray(signal.releaseVersions || signal.release_versions),
-        app: signal.app ? String(signal.app) : payload.project ? String(payload.project) : null,
+        app: normalizeApp(signal),
+        sourceUrl: sourceUrl || null,
       });
     }
   }
 
   if (serviceKind === 'crash' && Array.isArray(payload.issues)) {
     for (const issue of payload.issues) {
+      const sourceUrl = normalizeSourceUrl(issue);
       result.push({
         source,
         id: String(issue.id || `sentry_${result.length + 1}`),
@@ -306,6 +321,7 @@ function normalizeSignals(payload, source, service = source) {
           issue.impact ? `Impact: ${issue.impact}` : null,
           issue.events ? `Events: ${issue.events}` : null,
           issue.users ? `Affected users: ${issue.users}` : null,
+          sourceUrl ? `Issue link: ${sourceUrl}` : null,
           ...(Array.isArray(issue.evidence) ? issue.evidence : []),
         ]),
         suggestedActions: toStringArray(issue.suggested_actions || issue.suggestedActions),
@@ -316,7 +332,8 @@ function normalizeSignals(payload, source, service = source) {
         baselineValue: null,
         confidence: issue.confidence ? String(issue.confidence) : null,
         releaseVersions: toStringArray(issue.releaseVersions || issue.release_versions),
-        app: issue.app ? String(issue.app) : payload.project ? String(payload.project) : null,
+        app: normalizeApp(issue),
+        sourceUrl: sourceUrl || null,
       });
     }
   }
@@ -602,6 +619,9 @@ function buildIssueDraft(signal, matchedFiles, titlePrefix, activeCadences: any[
   if (signal.app) {
     evidence.unshift(`App: ${signal.app}`);
   }
+  if (signal.sourceUrl && !evidence.some((line) => String(line).includes(signal.sourceUrl))) {
+    evidence.push(`Issue link: ${signal.sourceUrl}`);
+  }
   if (signal.metric && signal.currentValue !== null && signal.baselineValue !== null) {
     evidence.push(
       `Metric \`${signal.metric}\`: current=${signal.currentValue}, baseline=${signal.baselineValue}`,
@@ -665,6 +685,8 @@ function buildIssueDraft(signal, matchedFiles, titlePrefix, activeCadences: any[
     files: matchedFiles,
     expected_impact: expectedImpact,
     confidence,
+    app: signal.app || null,
+    source_url: signal.sourceUrl || null,
     cadences: activeCadences.map((cadence) => cadence.key),
   };
 }

@@ -1110,6 +1110,41 @@ function hasSuccessfulExternalDelivery(results) {
   return results.some((result) => result?.sent === true && result?.external === true);
 }
 
+function truncateMessageText(value, maxLength = 96) {
+  const text = String(value || '').replace(/\s+/g, ' ').trim();
+  if (text.length <= maxLength) return text;
+  return `${text.slice(0, Math.max(0, maxLength - 3)).trim()}...`;
+}
+
+function issueProjectLabel(issue) {
+  return String(issue?.app || issue?.source_project || issue?.sourceProject || issue?.project || 'unscoped').trim();
+}
+
+function issueSourceUrl(issue) {
+  const direct = String(issue?.source_url || issue?.sourceUrl || issue?.issue_url || issue?.issueUrl || '').trim();
+  if (direct) return direct;
+  const body = String(issue?.body || '');
+  const match = body.match(/(?:Issue link|Permalink):\s*(https?:\/\/\S+)/i);
+  return match ? match[1].replace(/[).,;]+$/, '') : '';
+}
+
+function formatIssueSummaryLine(issue, maxTitleLength = 92) {
+  const title = truncateMessageText(issue?.title, maxTitleLength);
+  const url = issueSourceUrl(issue);
+  return url ? `${title} (${url})` : title;
+}
+
+function groupIssuesByProject(issues, maxIssues = 4) {
+  const grouped = new Map();
+  for (const issue of issues.slice(0, maxIssues)) {
+    const label = issueProjectLabel(issue);
+    const bucket = grouped.get(label) || [];
+    bucket.push(issue);
+    grouped.set(label, bucket);
+  }
+  return [...grouped.entries()];
+}
+
 async function deliverConnectorHealthAlert({ config, configPath, message, statusPayload, unhealthyConnectors, fingerprint }) {
   const channels = getConnectorHealthChannels(config);
   if (config?.notifications?.connectorHealth?.enabled === false) {
@@ -1189,21 +1224,24 @@ function buildGrowthRunSummaryMessage({ issuesPayload, activeCadences, sourceFil
 
   if (isShortOperationalCadence(activeCadences)) {
     const heading = activeCadences.some((cadence) => String(cadence?.key) === 'healthcheck')
-      ? 'OpenClaw production healthcheck'
-      : 'OpenClaw daily guardrail';
+      ? 'OpenClaw healthcheck'
+      : 'OpenClaw daily';
     const lines = [
-      `${heading}: ${issueCount > 0 ? `${issueCount} finding(s)` : 'no new finding'}`,
-      `Sources: ${sourceNames}`,
+      `${heading}: ${issueCount > 0 ? `${issueCount} finding(s)` : 'OK'}`,
     ];
     if (issueCount > 0) {
-      lines.push('Top:');
-      for (const issue of issues.slice(0, 3)) {
-        lines.push(`- ${issue.title}`);
+      const groupedIssues = groupIssuesByProject(issues, 4);
+      if (groupedIssues.length > 0) {
+        lines.push('Top by project:');
+        for (const [project, projectIssues] of groupedIssues) {
+          const formatted = projectIssues.map((issue) => formatIssueSummaryLine(issue, 84)).filter(Boolean);
+          if (formatted.length > 0) lines.push(`- ${project}: ${formatted.join(' | ')}`);
+        }
       }
       lines.push(
         createdGitHubArtifact
-          ? 'Action: GitHub artifact creation was attempted.'
-          : 'Action: alert/handoff only; GitHub auto-create is disabled or unavailable.',
+          ? 'Action: GitHub artifact attempted.'
+          : 'Action: external alert only.',
       );
     }
     if (charts.length > 0) {

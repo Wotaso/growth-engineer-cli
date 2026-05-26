@@ -7,6 +7,8 @@ import { writeJsonOutput, buildSentrySummary } from './openclaw-exporters-lib.mj
 const DEFAULT_BASE_URL = 'https://sentry.io';
 const DEFAULT_CONFIG_PATH = 'data/openclaw-growth-engineer/config.json';
 const DEFAULT_SENTRY_FETCH_RETRIES = 3;
+const DEFAULT_SENTRY_REQUEST_TIMEOUT_MS = 15_000;
+const DEFAULT_SENTRY_FETCH_CONCURRENCY = 3;
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -26,10 +28,53 @@ function isRetryableSentryStatus(status) {
   return status === 429 || status >= 500;
 }
 
+function positiveIntegerEnv(name, fallback, min = 1, max = 120_000) {
+  const parsed = Number.parseInt(String(process.env[name] || ''), 10);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.max(min, Math.min(max, parsed));
+}
+
+function sentryRequestTimeoutMs() {
+  return positiveIntegerEnv('OPENCLAW_SENTRY_REQUEST_TIMEOUT_MS', DEFAULT_SENTRY_REQUEST_TIMEOUT_MS, 1_000, 60_000);
+}
+
+function sentryFetchConcurrency() {
+  return positiveIntegerEnv('OPENCLAW_SENTRY_FETCH_CONCURRENCY', DEFAULT_SENTRY_FETCH_CONCURRENCY, 1, 10);
+}
+
 function getSentryRetryDelayMs(response, attempt) {
   const retryAfterMs = parseRetryAfterMs(response.headers.get('retry-after'));
   if (retryAfterMs !== null) return Math.min(retryAfterMs, 15_000);
   return Math.min(1_000 * 2 ** attempt, 8_000);
+}
+
+function isAbortError(error) {
+  return error && typeof error === 'object' && ((error as any).name === 'AbortError' || (error as any).code === 'ABORT_ERR');
+}
+
+function isRetryableSentryError(error) {
+  const status = error && typeof error === 'object' ? Number((error as any).status) : null;
+  if (Number.isFinite(status) && isRetryableSentryStatus(status)) return true;
+  if (error && typeof error === 'object' && (error as any).retryable === true) return true;
+  return /timed out|timeout|fetch failed|network|ECONNRESET|ECONNREFUSED|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|socket hang up|Sentry API (?:429|5\d\d)/i.test(
+    error instanceof Error ? error.message : String(error || ''),
+  );
+}
+
+function compactErrorDetail(error) {
+  const raw = error instanceof Error ? error.message : String(error || 'unknown error');
+  const text = raw
+    .replace(/<!doctype html>[\s\S]*?<\/html>/gi, 'HTML error response')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (/Sentry API 429/i.test(text)) return 'Sentry API rate-limited the request.';
+  if (/Sentry API 5\d\d/i.test(text)) return 'Sentry API returned a retryable 5xx response.';
+  if (/timed out|timeout/i.test(text)) return 'Sentry request timed out after retry.';
+  if (/fetch failed|network|ECONNRESET|ECONNREFUSED|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|socket hang up/i.test(text)) {
+    return 'Sentry network request failed after retry.';
+  }
+  return text.length > 220 ? `${text.slice(0, 217)}...` : text;
 }
 
 function printHelpAndExit(exitCode, reason = null) {
@@ -157,7 +202,7 @@ function normalizeProjectEntries(account) {
 }
 
 function normalizeAccountConfigs(rawAccounts, args) {
-  return rawAccounts.flatMap((account, index) => {
+  const normalized = rawAccounts.flatMap((account, index) => {
     if (!account || typeof account !== 'object') return [];
     const id = String(account.id || account.key || account.label || `sentry_${index + 1}`).trim();
     const baseUrl = String(account.baseUrl || account.base_url || account.url || args.baseUrl || DEFAULT_BASE_URL).trim();
@@ -192,6 +237,28 @@ function normalizeAccountConfigs(rawAccounts, args) {
       maxSignals: args.maxSignals,
     }];
   });
+  return dedupeAccountConfigs(normalized);
+}
+
+function dedupeAccountConfigs(accounts) {
+  const seen = new Set();
+  const result = [];
+  for (const account of accounts) {
+    const key = JSON.stringify({
+      baseUrl: String(account.baseUrl || DEFAULT_BASE_URL).replace(/\/$/, '').toLowerCase(),
+      tokenEnv: account.tokenEnv,
+      org: account.org,
+      project: account.project || '',
+      environment: account.environment || '',
+      last: account.last || '',
+      query: account.query || '',
+      limit: account.limit || '',
+    });
+    if (seen.has(key)) continue;
+    seen.add(key);
+    result.push(account);
+  }
+  return result;
 }
 
 async function expandDiscoveredProjects(account, token) {
@@ -271,7 +338,10 @@ function describeAccountTarget(account) {
 
 function withAccountTargetError(error, account, action) {
   const detail = error instanceof Error ? error.message : String(error);
-  return new Error(`${action} failed for ${describeAccountTarget(account)}: ${detail}`);
+  const wrapped = new Error(`${action} failed for ${describeAccountTarget(account)}: ${detail}`);
+  (wrapped as any).status = error && typeof error === 'object' ? (error as any).status : undefined;
+  (wrapped as any).retryable = isRetryableSentryError(error);
+  return wrapped;
 }
 
 function buildUrl(baseUrl, pathname, params) {
@@ -296,9 +366,13 @@ async function sentryFetchJson(url, token) {
   let lastError = null;
   for (let attempt = 0; attempt < DEFAULT_SENTRY_FETCH_RETRIES; attempt += 1) {
     let response;
+    const controller = new AbortController();
+    const timeoutMs = sentryRequestTimeoutMs();
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
     try {
       response = await fetch(url, {
         method: 'GET',
+        signal: controller.signal,
         headers: {
           Accept: 'application/json',
           Authorization: `Bearer ${token}`,
@@ -306,18 +380,25 @@ async function sentryFetchJson(url, token) {
         },
       });
     } catch (error) {
-      lastError = error;
+      lastError = isAbortError(error) ? new Error(`Sentry API request timed out after ${timeoutMs}ms`) : error;
+      if (lastError && typeof lastError === 'object') {
+        (lastError as any).retryable = true;
+      }
       if (attempt < DEFAULT_SENTRY_FETCH_RETRIES - 1) {
         await sleep(Math.min(1_000 * 2 ** attempt, 8_000));
         continue;
       }
-      throw error;
+      throw lastError;
+    } finally {
+      clearTimeout(timeout);
     }
     const body = await response.text();
     if (response.ok) {
       return body ? JSON.parse(body) : null;
     }
     lastError = new Error(`Sentry API ${response.status}: ${body.slice(0, 500) || 'request failed'}`);
+    (lastError as any).status = response.status;
+    (lastError as any).retryable = isRetryableSentryStatus(response.status);
     if (isRetryableSentryStatus(response.status) && attempt < DEFAULT_SENTRY_FETCH_RETRIES - 1) {
       await sleep(getSentryRetryDelayMs(response, attempt));
       continue;
@@ -376,6 +457,74 @@ async function listIssues(account, token) {
   }
 }
 
+function buildFailureRecord(error, account, action) {
+  return {
+    id: account.id || account.accountId || null,
+    accountId: account.accountId || account.id || null,
+    label: account.label || account.accountId || account.id || 'Sentry',
+    baseUrl: account.baseUrl || DEFAULT_BASE_URL,
+    org: account.org || null,
+    project: account.project || null,
+    environment: account.environment || null,
+    action,
+    retryable: isRetryableSentryError(error),
+    detail: compactErrorDetail(error),
+  };
+}
+
+function formatBlockingFailures(failures) {
+  return failures
+    .slice(0, 5)
+    .map((failure) => {
+      const target = [
+        failure.label,
+        failure.org ? `org=${failure.org}` : null,
+        failure.project ? `project=${failure.project}` : null,
+      ].filter(Boolean).join(' ');
+      return `${target}: ${failure.detail}`;
+    })
+    .join('\n');
+}
+
+async function mapLimit(items, limit, mapper) {
+  const results = [];
+  let nextIndex = 0;
+  const workerCount = Math.min(limit, items.length);
+  const workers = Array.from({ length: workerCount }, async () => {
+    while (nextIndex < items.length) {
+      const index = nextIndex;
+      nextIndex += 1;
+      results[index] = await mapper(items[index], index);
+    }
+  });
+  await Promise.all(workers);
+  return results;
+}
+
+function attachFailureMeta(summary, failures) {
+  if (failures.length === 0) return summary;
+  return {
+    ...summary,
+    meta: {
+      ...(summary?.meta || {}),
+      partial: true,
+      failureCount: failures.length,
+      failures: failures.map((failure) => ({
+        id: failure.id,
+        accountId: failure.accountId,
+        label: failure.label,
+        baseUrl: failure.baseUrl,
+        org: failure.org,
+        project: failure.project,
+        environment: failure.environment,
+        action: failure.action,
+        retryable: failure.retryable,
+        detail: failure.detail,
+      })),
+    },
+  };
+}
+
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   const configuredAccounts = await loadConfiguredAccounts(args);
@@ -385,34 +534,46 @@ async function main() {
     );
   }
   const accounts = [];
+  const failures = [];
   for (const account of configuredAccounts) {
     try {
       const token = requireValue(process.env[account.tokenEnv], `${account.tokenEnv} for ${describeAccountTarget(account)}`);
       accounts.push(...await expandDiscoveredProjects(account, token));
     } catch (error) {
-      throw withAccountTargetError(error, account, 'Sentry project discovery');
+      const wrapped = withAccountTargetError(error, account, 'Sentry project discovery');
+      failures.push(buildFailureRecord(wrapped, account, 'project_discovery'));
     }
   }
   const summaries = [];
-  for (const account of accounts) {
-    const token = requireValue(process.env[account.tokenEnv], `${account.tokenEnv} for ${describeAccountTarget(account)}`);
-    const issuesPayload = redactData(await listIssues(account, token));
-    summaries.push({
-      id: account.id,
-      label: account.label,
-      org: account.org,
-      project: account.project,
-      environment: account.environment,
-      last: account.last || args.last,
-      issuesPayload,
-      maxSignals: args.maxSignals,
-    });
+  await mapLimit(accounts, sentryFetchConcurrency(), async (account) => {
+    try {
+      const token = requireValue(process.env[account.tokenEnv], `${account.tokenEnv} for ${describeAccountTarget(account)}`);
+      const issuesPayload = redactData(await listIssues(account, token));
+      summaries.push({
+        id: account.id,
+        label: account.label,
+        org: account.org,
+        project: account.project,
+        environment: account.environment,
+        last: account.last || args.last,
+        issuesPayload,
+        maxSignals: args.maxSignals,
+      });
+    } catch (error) {
+      failures.push(buildFailureRecord(error, account, 'issue_fetch'));
+    }
+  });
+
+  const blockingFailures = failures.filter((failure) => !failure.retryable);
+  if (blockingFailures.length > 0) {
+    throw new Error(`Sentry connector has non-retryable configuration/auth failures:\n${formatBlockingFailures(blockingFailures)}`);
   }
+
   const summary =
     summaries.length === 1
       ? buildSentrySummary(summaries[0])
       : buildSentrySummary({ accounts: summaries, last: args.last, maxSignals: args.maxSignals });
-  await writeJsonOutput(args.out, summary);
+  await writeJsonOutput(args.out, attachFailureMeta(summary, failures));
 }
 
 main().catch((error) => {
