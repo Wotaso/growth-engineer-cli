@@ -1570,14 +1570,20 @@ function normalizeConnectorProgressKey(key): ConnectorKey | null {
 
 async function withConnectorHealthLoading<T>(
   taskFactory: (onProgress: (event: any) => void) => Promise<T>,
+  expectedConnectors: ConnectorKey[] = [...CONNECTOR_KEYS],
 ): Promise<T> {
+  const expected = orderConnectors(expectedConnectors);
+  if (expected.length === 0) {
+    return await taskFactory(() => {});
+  }
   const frames = ['-', '\\', '|', '/'];
   const completed = new Set<ConnectorKey>();
+  const expectedSet = new Set<ConnectorKey>(expected);
   let index = 0;
   let current = 'starting';
   const render = () => {
-    const count = Math.min(completed.size, CONNECTOR_KEYS.length);
-    process.stdout.write(`\rChecking connector health ${count}/${CONNECTOR_KEYS.length} (${current}) ${frames[index]}`);
+    const count = Math.min(completed.size, expected.length);
+    process.stdout.write(`\rChecking connector health ${count}/${expected.length} (${current}) ${frames[index]}`);
   };
   const timer = setInterval(() => {
     index = (index + 1) % frames.length;
@@ -1587,12 +1593,12 @@ async function withConnectorHealthLoading<T>(
   try {
     const result = await taskFactory((event) => {
       const key = normalizeConnectorProgressKey(event?.key);
-      if (!key) return;
+      if (!key || !expectedSet.has(key)) return;
       current = connectorLabel(key);
       if (event?.phase === 'finish') completed.add(key);
       render();
     });
-    CONNECTOR_KEYS.forEach((key) => completed.add(key));
+    expected.forEach((key) => completed.add(key));
     current = 'done';
     render();
     process.stdout.write('\n');
@@ -1715,7 +1721,44 @@ function connectorKeysNeedingAttention(healthByConnector: Record<string, any> = 
   );
 }
 
-async function getConnectorPickerHealth(configPath, onProgress: (event: any) => void = () => {}) {
+function isConfiguredSource(config, sourceName) {
+  return Boolean(config?.sources?.[sourceName] && config.sources[sourceName].enabled !== false);
+}
+
+function configuredConnectorKeysFromConfig(config): ConnectorKey[] {
+  const configured = new Set<ConnectorKey>();
+  if (!config || typeof config !== 'object') return [];
+  for (const key of ['analytics', 'revenuecat', 'paddle', 'seo', 'sentry', 'coolify'] as ConnectorKey[]) {
+    if (isConfiguredSource(config, key)) configured.add(key);
+  }
+  if (isConfiguredGitHubRepo(config?.project?.githubRepo)) configured.add('github');
+  for (const source of Array.isArray(config?.sources?.extra) ? config.sources.extra : []) {
+    if (!source || source.enabled === false) continue;
+    if (source.service === 'asc-cli') {
+      configured.add('asc');
+      continue;
+    }
+    const connector = normalizeConnectorProgressKey(source.key || source.service || source.type);
+    if (connector) configured.add(connector);
+  }
+  return [...configured];
+}
+
+async function connectorKeysForHealthCheck(configPath): Promise<ConnectorKey[]> {
+  const configured = new Set<ConnectorKey>();
+  CONNECTOR_KEYS.forEach((key) => {
+    if (isConnectorLocallyConfigured(key)) configured.add(key);
+  });
+  const config = await readJsonIfPresent(configPath).catch(() => null);
+  for (const key of configuredConnectorKeysFromConfig(config)) configured.add(key);
+  return orderConnectors([...configured]);
+}
+
+async function getConnectorPickerHealth(
+  configPath,
+  onProgress: (event: any) => void = () => {},
+  onlyConnectors: ConnectorKey[] = [],
+) {
   if (!(await fileExists(configPath))) {
     return Object.fromEntries(
       CONNECTOR_KEYS.map((key) => [
@@ -1729,8 +1772,12 @@ async function getConnectorPickerHealth(configPath, onProgress: (event: any) => 
       ]),
     );
   }
+  if (onlyConnectors.length === 0) {
+    return Object.fromEntries(CONNECTOR_KEYS.map((key) => [key, getConnectorHealth(key, {})]));
+  }
+  const onlyArg = ` --only-connectors ${quote(orderConnectors(onlyConnectors).join(','))}`;
   const result = await runCommandCaptureWithProgress(
-    `${nodeRuntimeScriptCommand('openclaw-growth-status.mjs')} --config ${quote(configPath)} --json --progress-json`,
+    `${nodeRuntimeScriptCommand('openclaw-growth-status.mjs')} --config ${quote(configPath)} --json --progress-json${onlyArg}`,
     onProgress,
   );
   const payload = parseJsonFromStdout(result.stdout);
@@ -4271,8 +4318,10 @@ async function runConnectorSetupWizard(args) {
     clearTerminal();
     printConnectorIntro();
     await migrateRuntimeSourceCommandsFile(args.config);
+    const healthCheckConnectors = await connectorKeysForHealthCheck(args.config);
     const healthByConnector = await withConnectorHealthLoading((onProgress) =>
-      getConnectorPickerHealth(args.config, onProgress),
+      getConnectorPickerHealth(args.config, onProgress, healthCheckConnectors),
+      healthCheckConnectors,
     );
     const existingFixes = connectorKeysNeedingAttention(healthByConnector);
     const requestedConnectors = args.connectors ? parseConnectorList(args.connectors) : [];
@@ -5290,8 +5339,10 @@ async function askInputSourceConfig(rl, config, configPath) {
   config = migrateRuntimeSourceCommands(config, configPath);
   await ensureDirForFile(configPath);
   await writeJsonFile(configPath, config);
+  const healthCheckConnectors = await connectorKeysForHealthCheck(configPath);
   const healthByConnector = await withConnectorHealthLoading((onProgress) =>
-    getConnectorPickerHealth(configPath, onProgress),
+    getConnectorPickerHealth(configPath, onProgress, healthCheckConnectors),
+    healthCheckConnectors,
   );
   const selected = await askConnectorSelectionWithHealth(
     rl,

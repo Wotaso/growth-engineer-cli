@@ -32,6 +32,8 @@ Usage:
 Options:
   --config <file>      Config path (default: ${DEFAULT_CONFIG_PATH})
   --timeout-ms <ms>    Live check timeout in milliseconds (default: ${DEFAULT_TIMEOUT_MS})
+  --only-connectors <list>
+                       Limit live checks to selected connectors
   --json               Print JSON (default)
   --progress-json      Emit machine-readable connector progress events on stderr
   --help, -h           Show help
@@ -55,6 +57,7 @@ function parseArgs(argv) {
     timeoutMs: DEFAULT_TIMEOUT_MS,
     json: true,
     progressJson: false,
+    onlyConnectors: [] as string[],
   };
 
   for (let index = 0; index < argv.length; index += 1) {
@@ -76,6 +79,12 @@ function parseArgs(argv) {
       args.json = true;
     } else if (token === '--progress-json') {
       args.progressJson = true;
+    } else if (token === '--only-connectors') {
+      args.onlyConnectors = String(next || '')
+        .split(',')
+        .map((entry) => entry.trim())
+        .filter(Boolean);
+      index += 1;
     } else if (token === '--help' || token === '-h') {
       printHelpAndExit(0);
     } else {
@@ -84,6 +93,10 @@ function parseArgs(argv) {
   }
 
   return args;
+}
+
+function onlyAllows(onlyConnectors: string[], connector: string) {
+  return !Array.isArray(onlyConnectors) || onlyConnectors.length === 0 || onlyConnectors.includes(connector);
 }
 
 function quote(value) {
@@ -219,7 +232,7 @@ function isConfiguredRepo(value) {
   return Boolean(repo && repo !== 'owner/repo' && /^[^/\s]+\/[^/\s]+$/.test(repo));
 }
 
-async function runPreflight(configPath, timeoutMs, progressJson = false) {
+async function runPreflight(configPath, timeoutMs, progressJson = false, onlyConnectors: string[] = []) {
   const command = [
     nodeRuntimeScriptCommand('openclaw-growth-preflight.mjs'),
     '--config',
@@ -228,6 +241,7 @@ async function runPreflight(configPath, timeoutMs, progressJson = false) {
     '--timeout-ms',
     String(timeoutMs),
     '--json',
+    ...(onlyConnectors.length > 0 ? ['--only-connectors', quote(onlyConnectors.join(','))] : []),
     ...(progressJson ? ['--progress-json'] : []),
   ].join(' ');
   const result = await runShell(command, {
@@ -424,46 +438,47 @@ async function main() {
   const configPath = path.resolve(args.config);
   const config = await readJson(configPath);
   await applyOpenClawSecretRefs(config);
-  const preflight = await runPreflight(configPath, args.timeoutMs, args.progressJson);
+  const onlyConnectors = args.onlyConnectors;
+  const preflight = await runPreflight(configPath, args.timeoutMs, args.progressJson, onlyConnectors);
   const preflightPayload = preflight.payload;
-  emitProgress(args.progressJson, {
-    phase: 'start',
-    key: 'appStoreConnect',
-    label: 'App Store Connect',
-    detail: 'ASC API-key reports auth',
-  });
+  if (onlyAllows(onlyConnectors, 'asc')) {
+    emitProgress(args.progressJson, {
+      phase: 'start',
+      key: 'appStoreConnect',
+      label: 'App Store Connect',
+      detail: 'ASC API-key reports auth',
+    });
+  }
 
   const [githubStatus, ascStatus] = await Promise.all([
-    checkGitHub(config, args.timeoutMs),
-    preflightPayload
-      ? summarizeAsc(preflightPayload, config, args.timeoutMs)
-      : Promise.resolve(connector('unknown', preflight.error || 'Preflight did not run')),
+    onlyAllows(onlyConnectors, 'github')
+      ? checkGitHub(config, args.timeoutMs)
+      : Promise.resolve(connector('not_enabled', 'GitHub check skipped; connector is not selected for live health')),
+    onlyAllows(onlyConnectors, 'asc')
+      ? preflightPayload
+        ? summarizeAsc(preflightPayload, config, args.timeoutMs)
+        : Promise.resolve(connector('unknown', preflight.error || 'Preflight did not run'))
+      : Promise.resolve(connector('not_enabled', 'App Store Connect check skipped; connector is not selected for live health')),
   ]);
 
-  const connectors = preflightPayload
-    ? {
-        analyticscli: summarizeAnalytics(preflightPayload, config),
-        github: githubStatus,
-        revenuecat: summarizeRevenueCat(preflightPayload, config),
-        sentry: summarizeSentry(preflightPayload, config),
-        coolify: summarizeCoolify(preflightPayload, config),
-        appStoreConnect: ascStatus,
-      }
-    : {
-        analyticscli: connector('unknown', preflight.error || 'Preflight did not run'),
-        github: githubStatus,
-        revenuecat: connector('unknown', preflight.error || 'Preflight did not run'),
-        sentry: connector('unknown', preflight.error || 'Preflight did not run'),
-        coolify: connector('unknown', preflight.error || 'Preflight did not run'),
-        appStoreConnect: ascStatus,
-      };
-  emitProgress(args.progressJson, {
-    phase: 'finish',
-    key: 'appStoreConnect',
-    label: 'App Store Connect',
-    detail: connectors.appStoreConnect?.detail || 'ASC check complete',
-    status: connectors.appStoreConnect?.status === 'connected' ? 'pass' : connectors.appStoreConnect?.status === 'partial' ? 'warn' : 'fail',
-  });
+  const connectors: Record<string, any> = {};
+  const statusOrUnknown = (summary) =>
+    preflightPayload ? summary(preflightPayload, config) : connector('unknown', preflight.error || 'Preflight did not run');
+  if (onlyAllows(onlyConnectors, 'analytics')) connectors.analyticscli = statusOrUnknown(summarizeAnalytics);
+  if (onlyAllows(onlyConnectors, 'github')) connectors.github = githubStatus;
+  if (onlyAllows(onlyConnectors, 'revenuecat')) connectors.revenuecat = statusOrUnknown(summarizeRevenueCat);
+  if (onlyAllows(onlyConnectors, 'sentry')) connectors.sentry = statusOrUnknown(summarizeSentry);
+  if (onlyAllows(onlyConnectors, 'coolify')) connectors.coolify = statusOrUnknown(summarizeCoolify);
+  if (onlyAllows(onlyConnectors, 'asc')) connectors.appStoreConnect = ascStatus;
+  if (onlyAllows(onlyConnectors, 'asc')) {
+    emitProgress(args.progressJson, {
+      phase: 'finish',
+      key: 'appStoreConnect',
+      label: 'App Store Connect',
+      detail: connectors.appStoreConnect?.detail || 'ASC check complete',
+      status: connectors.appStoreConnect?.status === 'connected' ? 'pass' : connectors.appStoreConnect?.status === 'partial' ? 'warn' : 'fail',
+    });
+  }
 
   const values = Object.values(connectors);
   const allConnected = values.every((entry: any) => entry.status === 'connected');
