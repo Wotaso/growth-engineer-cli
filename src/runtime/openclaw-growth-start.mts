@@ -2284,111 +2284,135 @@ async function main() {
       : 'analytics scope check failed',
     status: analyticsProjectSetup.ok ? 'pass' : 'fail',
   });
-  emitProgress(args.progressJson, {
-    phase: 'start',
-    key: 'ascApp',
-    label: 'ASC app scope',
-    detail: 'resolving App Store Connect app scope',
-  });
-  const ascAppSetup = await ensureAscAppConfigured(configPath, args.ascApp);
-  emitProgress(args.progressJson, {
-    phase: 'finish',
-    key: 'ascApp',
-    label: 'ASC app scope',
-    detail: ascAppSetup.ok
-      ? ascAppSetup.appId
-        ? `using app ${ascAppSetup.appId}`
-        : ascAppSetup.appScope === 'all_accessible_apps'
-          ? `using all accessible apps (${ascAppSetup.appCount || 0} found)`
-          : 'not enabled'
-      : describeAscAppSetupFailure(ascAppSetup.error),
-    status: ascAppSetup.ok ? 'pass' : 'fail',
-  });
-  if (!ascAppSetup.ok) {
-    process.stdout.write(
-      `${JSON.stringify(
-        {
-          ok: false,
-          phase: 'asc_app_setup',
-          configCreated: configResult.created,
-          configPath,
-          heartbeat,
-          openclawCron,
-          hermesCron,
-          projectConfigured: projectConfigured || analyticsProjectSetup.configured,
-          analyticsProjectId: analyticsProjectSetup.projectId || null,
-          ascAppConfigured: false,
-          connectorSetup,
-          needsUserInput: false,
-          question: null,
-          apps: [],
-          nextCommand: null,
-          blockers: [
-            {
-              check: 'connection:asc_app',
-              detail: describeAscAppSetupFailure(ascAppSetup.error),
-              remediation: remediateAscAppSetupFailure(ascAppSetup.error),
-            },
-          ],
-        },
-        null,
-        2,
-      )}\n`,
-    );
-    process.exitCode = 1;
-    return;
-  }
+  const shouldRunAscSetup =
+    args.onlyConnectors.length === 0 ||
+    args.onlyConnectors.includes('asc') ||
+    Boolean(normalizeString(args.ascApp)) ||
+    configHasEnabledAscSource(initialConfig);
+  let ascAppSetup: any = {
+    ok: true,
+    configured: false,
+    changed: false,
+    appId: null,
+    appScope: 'skipped_by_connector_filter',
+    needsUserInput: false,
+  };
+  let ascAnalyticsRequestSetup: any = {
+    ok: true,
+    status: 'skipped',
+    requestId: null,
+    requestIds: [],
+    detail: 'ASC connector was not selected',
+    results: [],
+  };
 
-  emitProgress(args.progressJson, {
-    phase: 'start',
-    key: 'ascAnalyticsRequest',
-    label: 'ASC analytics reports',
-    detail: 'checking ongoing Analytics Report Request',
-  });
-  const ascAnalyticsRequestSetup = await ensureAscAnalyticsRequestsForAppScope(ascAppSetup);
-  emitProgress(args.progressJson, {
-    phase: 'finish',
-    key: 'ascAnalyticsRequest',
-    label: 'ASC analytics reports',
-    detail: ascAnalyticsRequestSetup.ok
-      ? ascAnalyticsRequestSetup.detail
-      : `could not ensure Analytics Report Request (${truncate(ascAnalyticsRequestSetup.error, 240)})`,
-    status: ascAnalyticsRequestSetup.ok ? 'pass' : 'fail',
-  });
-  if (!ascAnalyticsRequestSetup.ok) {
-    process.stdout.write(
-      `${JSON.stringify(
-        {
-          ok: false,
-          phase: 'asc_analytics_request_setup',
-          configCreated: configResult.created,
-          configPath,
-          heartbeat,
-          openclawCron,
-          hermesCron,
-          projectConfigured: projectConfigured || analyticsProjectSetup.configured,
-          analyticsProjectId: analyticsProjectSetup.projectId || null,
-          ascAppConfigured: ascAppSetup.configured,
-          ascAppId: ascAppSetup.appId || null,
-          ascAppScope: ascAppSetup.appScope || null,
-          ascAnalyticsRequestResults: ascAnalyticsRequestSetup.results || [],
-          connectorSetup,
-          needsUserInput: false,
-          question: null,
-          blockers: [
-            {
-              check: 'connection:asc_analytics_request',
-              detail: `Could not ensure App Store Connect Analytics Report Request: ${truncate(ascAnalyticsRequestSetup.error, 800)}`,
-              remediation: 'Use an ASC API key with Admin for first setup so Growth Engineer can create the ongoing Analytics Report Request. After the request exists, rotate to Sales and Reports for steady-state downloads.',
-            },
-          ],
-        },
-        null,
-        2,
-      )}\n`,
-    );
-    process.exitCode = 1;
-    return;
+  if (shouldRunAscSetup) {
+    emitProgress(args.progressJson, {
+      phase: 'start',
+      key: 'ascApp',
+      label: 'ASC app scope',
+      detail: 'resolving App Store Connect app scope',
+    });
+    ascAppSetup = await ensureAscAppConfigured(configPath, args.ascApp);
+    emitProgress(args.progressJson, {
+      phase: 'finish',
+      key: 'ascApp',
+      label: 'ASC app scope',
+      detail: ascAppSetup.ok
+        ? ascAppSetup.appId
+          ? `using app ${ascAppSetup.appId}`
+          : ascAppSetup.appScope === 'all_accessible_apps'
+            ? `using all accessible apps (${ascAppSetup.appCount || 0} found)`
+            : 'not enabled'
+        : describeAscAppSetupFailure(ascAppSetup.error),
+      status: ascAppSetup.ok ? 'pass' : 'fail',
+    });
+    if (!ascAppSetup.ok) {
+      process.stdout.write(
+        `${JSON.stringify(
+          {
+            ok: false,
+            phase: 'asc_app_setup',
+            configCreated: configResult.created,
+            configPath,
+            heartbeat,
+            openclawCron,
+            hermesCron,
+            projectConfigured: projectConfigured || analyticsProjectSetup.configured,
+            analyticsProjectId: analyticsProjectSetup.projectId || null,
+            ascAppConfigured: false,
+            connectorSetup,
+            needsUserInput: false,
+            question: null,
+            apps: [],
+            nextCommand: null,
+            blockers: [
+              {
+                check: 'connection:asc_app',
+                detail: describeAscAppSetupFailure(ascAppSetup.error),
+                remediation: remediateAscAppSetupFailure(ascAppSetup.error),
+              },
+            ],
+          },
+          null,
+          2,
+        )}\n`,
+      );
+      process.exitCode = 1;
+      return;
+    }
+
+    emitProgress(args.progressJson, {
+      phase: 'start',
+      key: 'ascAnalyticsRequest',
+      label: 'ASC analytics reports',
+      detail: 'checking ongoing Analytics Report Request',
+    });
+    ascAnalyticsRequestSetup = await ensureAscAnalyticsRequestsForAppScope(ascAppSetup);
+    emitProgress(args.progressJson, {
+      phase: 'finish',
+      key: 'ascAnalyticsRequest',
+      label: 'ASC analytics reports',
+      detail: ascAnalyticsRequestSetup.ok
+        ? ascAnalyticsRequestSetup.detail
+        : `could not ensure Analytics Report Request (${truncate(ascAnalyticsRequestSetup.error, 240)})`,
+      status: ascAnalyticsRequestSetup.ok ? 'pass' : 'fail',
+    });
+    if (!ascAnalyticsRequestSetup.ok) {
+      process.stdout.write(
+        `${JSON.stringify(
+          {
+            ok: false,
+            phase: 'asc_analytics_request_setup',
+            configCreated: configResult.created,
+            configPath,
+            heartbeat,
+            openclawCron,
+            hermesCron,
+            projectConfigured: projectConfigured || analyticsProjectSetup.configured,
+            analyticsProjectId: analyticsProjectSetup.projectId || null,
+            ascAppConfigured: ascAppSetup.configured,
+            ascAppId: ascAppSetup.appId || null,
+            ascAppScope: ascAppSetup.appScope || null,
+            ascAnalyticsRequestResults: ascAnalyticsRequestSetup.results || [],
+            connectorSetup,
+            needsUserInput: false,
+            question: null,
+            blockers: [
+              {
+                check: 'connection:asc_analytics_request',
+                detail: `Could not ensure App Store Connect Analytics Report Request: ${truncate(ascAnalyticsRequestSetup.error, 800)}`,
+                remediation: 'Use an ASC API key with Admin for first setup so Growth Engineer can create the ongoing Analytics Report Request. After the request exists, rotate to Sales and Reports for steady-state downloads.',
+              },
+            ],
+          },
+          null,
+          2,
+        )}\n`,
+      );
+      process.exitCode = 1;
+      return;
+    }
   }
 
   const preflightResult = await runPreflight(configPath, args.testConnections, args.progressJson, args.onlyConnectors);

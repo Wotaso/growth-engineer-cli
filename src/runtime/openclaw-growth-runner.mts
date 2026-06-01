@@ -22,6 +22,8 @@ const DEFAULT_CONFIG_PATH = 'data/openclaw-growth-engineer/config.json';
 const DEFAULT_STATE_PATH = 'data/openclaw-growth-engineer/state.json';
 const DEFAULT_SCHEDULER_PROOF_PATH = 'data/openclaw-growth-engineer/runtime/scheduler-proof.jsonl';
 const DEFAULT_CONNECTOR_HEALTH_INTERVAL_MINUTES = 360;
+const DEFAULT_DAILY_ISSUE_EVENT_GROWTH_MULTIPLIER = 2;
+const DEFAULT_DAILY_ISSUE_EVENT_GROWTH_MIN_DELTA = 10;
 const SELF_UPDATE_INTERVAL_MS = 24 * 60 * 60 * 1000;
 const RUNTIME_DIR = path.dirname(fileURLToPath(import.meta.url));
 let schedulerProofPath = path.resolve(DEFAULT_SCHEDULER_PROOF_PATH);
@@ -1145,6 +1147,211 @@ function groupIssuesByProject(issues, maxIssues = 4) {
   return [...grouped.entries()];
 }
 
+function getDailyIssueDedupeConfig(config) {
+  const raw = config?.schedule?.dailyIssueDedupe || config?.notifications?.growthRun?.dailyIssueDedupe || {};
+  const multiplier = Number(raw.eventGrowthMultiplier ?? raw.multiplier);
+  const minDelta = Number(raw.eventGrowthMinDelta ?? raw.minDelta);
+  return {
+    enabled: raw.enabled !== false,
+    eventGrowthMultiplier:
+      Number.isFinite(multiplier) && multiplier > 1
+        ? multiplier
+        : DEFAULT_DAILY_ISSUE_EVENT_GROWTH_MULTIPLIER,
+    eventGrowthMinDelta:
+      Number.isFinite(minDelta) && minDelta > 0
+        ? minDelta
+        : DEFAULT_DAILY_ISSUE_EVENT_GROWTH_MIN_DELTA,
+  };
+}
+
+function resolveDailyIssueDedupeTimeZone(config) {
+  return String(
+    config?.schedule?.timezone ||
+      config?.automation?.openclawCron?.timezone ||
+      process.env.TZ ||
+      'UTC',
+  ).trim() || 'UTC';
+}
+
+function formatDateInTimeZone(date, timeZone) {
+  try {
+    const parts = new Intl.DateTimeFormat('en-CA', {
+      timeZone,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    }).formatToParts(date);
+    const byType = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+    if (byType.year && byType.month && byType.day) {
+      return `${byType.year}-${byType.month}-${byType.day}`;
+    }
+  } catch {
+    // Fall back to UTC below for invalid host timezone settings.
+  }
+  return date.toISOString().slice(0, 10);
+}
+
+function normalizeIssueIdentityPart(value) {
+  return String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, ' ');
+}
+
+function buildDailyIssueKey(issue) {
+  const stableIdentity = [
+    issueSourceUrl(issue),
+    issue?.source_url,
+    issue?.sourceUrl,
+    issue?.issue_url,
+    issue?.issueUrl,
+    issue?.signal_id,
+    issue?.signalId,
+    issue?.id,
+  ]
+    .map((value) => String(value || '').trim())
+    .find(Boolean);
+  const fallbackIdentity = [
+    issueProjectLabel(issue),
+    issue?.source,
+    issue?.area,
+    issue?.title,
+  ]
+    .map(normalizeIssueIdentityPart)
+    .filter(Boolean)
+    .join('|');
+  return sha256(stableIdentity || fallbackIdentity || stableStringify(issue));
+}
+
+function coerceIssueNumber(value) {
+  if (value === null || value === undefined || value === '') return null;
+  if (typeof value === 'number') return Number.isFinite(value) ? value : null;
+  const normalized = String(value).replace(/,/g, '').trim();
+  if (!normalized) return null;
+  const number = Number(normalized);
+  return Number.isFinite(number) ? number : null;
+}
+
+function issueEventCount(issue) {
+  const direct = [
+    issue?.events,
+    issue?.eventCount,
+    issue?.event_count,
+    issue?.current_value,
+    issue?.currentValue,
+    issue?.count,
+  ];
+  for (const value of direct) {
+    const number = coerceIssueNumber(value);
+    if (number !== null) return number;
+  }
+  const text = [
+    issue?.impact,
+    issue?.summary,
+    ...(Array.isArray(issue?.evidence) ? issue.evidence : []),
+    issue?.body,
+  ]
+    .filter(Boolean)
+    .join('\n');
+  const match = text.match(/\bEvents?:\s*([0-9][0-9,]*(?:\.[0-9]+)?)/i);
+  return match ? coerceIssueNumber(match[1]) : null;
+}
+
+function isDrasticDailyIssueEventGrowth(currentEvents, previousEntry, dedupeConfig) {
+  if (currentEvents === null || currentEvents === undefined) return false;
+  const previousEvents = coerceIssueNumber(
+    previousEntry?.lastReportedEvents ?? previousEntry?.lastSeenEvents,
+  );
+  if (previousEvents === null || previousEvents < 0) return false;
+  const requiredEvents = Math.max(
+    previousEvents * dedupeConfig.eventGrowthMultiplier,
+    previousEvents + dedupeConfig.eventGrowthMinDelta,
+  );
+  return currentEvents >= requiredEvents;
+}
+
+function applyDailyIssueDedupe(issuesPayload, state, config, activeCadences, now = new Date()) {
+  const issues = Array.isArray(issuesPayload?.issues) ? issuesPayload.issues : [];
+  const dedupeConfig = getDailyIssueDedupeConfig(config);
+  if (!dedupeConfig.enabled || !isShortOperationalCadence(activeCadences) || issues.length === 0) {
+    return {
+      issuesPayload,
+      dailyIssueReports: state?.dailyIssueReports || null,
+      suppressedCount: 0,
+      reportedCount: issues.length,
+      hasDrasticEventGrowth: false,
+    };
+  }
+
+  const timeZone = resolveDailyIssueDedupeTimeZone(config);
+  const date = formatDateInTimeZone(now, timeZone);
+  const nowIso = now.toISOString();
+  const previousState = state?.dailyIssueReports?.date === date ? state.dailyIssueReports : null;
+  const previousIssues = previousState?.issues && typeof previousState.issues === 'object'
+    ? previousState.issues
+    : {};
+  const nextIssues = { ...previousIssues };
+  const reportableIssues = [];
+  let suppressedCount = 0;
+  let hasDrasticEventGrowth = false;
+
+  for (const issue of issues) {
+    const key = buildDailyIssueKey(issue);
+    const previousEntry = previousIssues[key] || null;
+    const events = issueEventCount(issue);
+    const shouldReport =
+      !previousEntry || isDrasticDailyIssueEventGrowth(events, previousEntry, dedupeConfig);
+    const reportReason = !previousEntry ? 'new_daily_issue' : 'event_growth';
+    const nextEntry: Record<string, any> = {
+      ...(previousEntry || {}),
+      title: String(issue?.title || previousEntry?.title || '').slice(0, 240),
+      app: issueProjectLabel(issue),
+      sourceUrl: issueSourceUrl(issue) || previousEntry?.sourceUrl || null,
+      lastSeenAt: nowIso,
+      lastSeenEvents: events ?? previousEntry?.lastSeenEvents ?? null,
+    };
+
+    if (shouldReport) {
+      reportableIssues.push(issue);
+      if (previousEntry) hasDrasticEventGrowth = true;
+      nextEntry.lastReportedAt = nowIso;
+      nextEntry.lastReportedEvents = events ?? previousEntry?.lastReportedEvents ?? null;
+      nextEntry.lastReportReason = reportReason;
+      nextEntry.reportCount = Number(previousEntry?.reportCount || 0) + 1;
+    } else {
+      suppressedCount += 1;
+      nextEntry.suppressedCount = Number(previousEntry?.suppressedCount || 0) + 1;
+    }
+    nextIssues[key] = nextEntry;
+  }
+
+  return {
+    issuesPayload: {
+      ...issuesPayload,
+      issue_count: reportableIssues.length,
+      issues: reportableIssues,
+      suppressed_issue_count: suppressedCount,
+      daily_issue_dedupe: {
+        date,
+        timeZone,
+        suppressedCount,
+        reportedCount: reportableIssues.length,
+        eventGrowthMultiplier: dedupeConfig.eventGrowthMultiplier,
+        eventGrowthMinDelta: dedupeConfig.eventGrowthMinDelta,
+      },
+    },
+    dailyIssueReports: {
+      date,
+      timeZone,
+      issues: nextIssues,
+      updatedAt: nowIso,
+    },
+    suppressedCount,
+    reportedCount: reportableIssues.length,
+    hasDrasticEventGrowth,
+  };
+}
+
 async function deliverConnectorHealthAlert({ config, configPath, message, statusPayload, unhealthyConnectors, fingerprint }) {
   const channels = getConnectorHealthChannels(config);
   if (config?.notifications?.connectorHealth?.enabled === false) {
@@ -1243,6 +1450,10 @@ function buildGrowthRunSummaryMessage({ issuesPayload, activeCadences, sourceFil
           ? 'Action: GitHub artifact attempted.'
           : 'Action: external alert only.',
       );
+    }
+    const suppressedIssueCount = Number(issuesPayload?.suppressed_issue_count || 0);
+    if (suppressedIssueCount > 0) {
+      lines.push(`Suppressed today: ${suppressedIssueCount} previously reported finding(s).`);
     }
     if (charts.length > 0) {
       lines.push(`Charts: ${charts.length}`);
@@ -2103,8 +2314,69 @@ async function runOnce(configPath, statePath) {
     cadencePlanPath,
   });
 
-  const issueFingerprint = buildIssueFingerprint(dryRun.issuesPayload);
-  const unchangedIssueSet = issueFingerprint === stateAfterSourceCollection.lastIssueFingerprint;
+  const dailyIssueDedupe = applyDailyIssueDedupe(
+    dryRun.issuesPayload,
+    stateAfterSourceCollection,
+    config,
+    activeCadences,
+  );
+  const deliverableIssuesPayload = dailyIssueDedupe.issuesPayload;
+  const issueFingerprint = buildIssueFingerprint(deliverableIssuesPayload);
+  const unchangedIssueSet =
+    issueFingerprint === stateAfterSourceCollection.lastIssueFingerprint &&
+    !dailyIssueDedupe.hasDrasticEventGrowth;
+
+  if (
+    Number(dryRun.issuesPayload?.issue_count || 0) > 0 &&
+    Number(deliverableIssuesPayload?.issue_count || 0) === 0 &&
+    dailyIssueDedupe.suppressedCount > 0
+  ) {
+    process.stdout.write(`[${new Date().toISOString()}] All findings were already reported today. Skip GitHub creation and external growth notification.\n`);
+    const completedAt = new Date().toISOString();
+    await fs.mkdir(path.dirname(statePath), { recursive: true });
+    await fs.writeFile(
+      statePath,
+      JSON.stringify(
+        {
+          ...stateAfterHealthCheck,
+          ...stateAfterSourceCollection,
+          sourceHashes: currentHashes,
+          sourceCursors,
+          lastSourceFailures: sourceFailures,
+          dailyIssueReports: dailyIssueDedupe.dailyIssueReports,
+          lastIssueFingerprint: issueFingerprint,
+          lastRunAt: completedAt,
+          lastOutFile: dryRun.outFile,
+          cadences: markCadencesRan(stateAfterSourceCollection, activeCadences, completedAt),
+          lastGrowthRunNotifications: [
+            {
+              sent: false,
+              target: 'growth_run',
+              detail: `all ${dailyIssueDedupe.suppressedCount} finding(s) already reported today; external growth notification suppressed`,
+            },
+          ],
+          skippedReason: 'daily_issue_dedupe',
+        },
+        null,
+        2,
+      ),
+      'utf8',
+    );
+    await appendSchedulerProof('runner_completed', {
+      configPath,
+      statePath,
+      completedAt,
+      skippedReason: 'daily_issue_dedupe',
+      activeCadences: activeCadences.map((cadence) => cadence.key),
+      outFile: dryRun.outFile,
+      issueCount: Number(dryRun.issuesPayload?.issue_count || 0),
+      suppressedIssueCount: dailyIssueDedupe.suppressedCount,
+      sourceFailures,
+      externalGrowthNotification: 'suppressed_daily_issue_dedupe',
+      socialOutput: 'HEARTBEAT_OK',
+    });
+    return;
+  }
 
   if (
     unchangedIssueSet &&
@@ -2122,6 +2394,7 @@ async function runOnce(configPath, statePath) {
           sourceHashes: currentHashes,
           sourceCursors,
           lastSourceFailures: sourceFailures,
+          dailyIssueReports: dailyIssueDedupe.dailyIssueReports,
           lastIssueFingerprint: issueFingerprint,
           lastRunAt: completedAt,
           lastOutFile: dryRun.outFile,
@@ -2159,7 +2432,7 @@ async function runOnce(configPath, statePath) {
     !unchangedIssueSet || config.schedule?.skipIfIssueSetUnchanged === false;
   const shouldCreateGitHubArtifact =
     createGitHubArtifact &&
-    Number(dryRun.issuesPayload?.issue_count || 0) > 0 &&
+    Number(deliverableIssuesPayload?.issue_count || 0) > 0 &&
     issueSetChangedOrExplicitlyAllowed;
   if (shouldCreateGitHubArtifact) {
     for (const githubArtifactMode of githubArtifactModes) {
@@ -2193,6 +2466,7 @@ async function runOnce(configPath, statePath) {
         sourceHashes: currentHashes,
         sourceCursors,
         lastSourceFailures: sourceFailures,
+        dailyIssueReports: dailyIssueDedupe.dailyIssueReports,
         lastIssueFingerprint: issueFingerprint,
         lastRunAt: completedAt,
         lastOutFile: dryRun.outFile,
@@ -2200,7 +2474,7 @@ async function runOnce(configPath, statePath) {
         lastGrowthRunNotifications: await deliverGrowthRunSummary({
           config,
           configPath,
-          issuesPayload: dryRun.issuesPayload,
+          issuesPayload: deliverableIssuesPayload,
           activeCadences,
           sourceFiles,
           fingerprint: issueFingerprint,
