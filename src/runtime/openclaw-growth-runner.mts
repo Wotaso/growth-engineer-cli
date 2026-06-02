@@ -24,6 +24,7 @@ const DEFAULT_SCHEDULER_PROOF_PATH = 'data/openclaw-growth-engineer/runtime/sche
 const DEFAULT_CONNECTOR_HEALTH_INTERVAL_MINUTES = 360;
 const DEFAULT_DAILY_ISSUE_EVENT_GROWTH_MULTIPLIER = 2;
 const DEFAULT_DAILY_ISSUE_EVENT_GROWTH_MIN_DELTA = 10;
+const DEFAULT_DAILY_RUNNER_FAILURE_RETENTION_DAYS = 14;
 const SELF_UPDATE_INTERVAL_MS = 24 * 60 * 60 * 1000;
 const RUNTIME_DIR = path.dirname(fileURLToPath(import.meta.url));
 let schedulerProofPath = path.resolve(DEFAULT_SCHEDULER_PROOF_PATH);
@@ -474,6 +475,34 @@ function resolveShellCommand(): string {
 
 function hardenUnattendedShellCommand(command) {
   return String(command || '').replace(/(^|[;&|]\s*)sudo(?!\s+-n(?:\s|$))(?=\s|$)/g, '$1sudo -n');
+}
+
+function redactCommandForDiagnostics(command) {
+  const raw = String(command || '').trim();
+  if (!raw) return '';
+  return raw
+    .replace(
+      /((?:^|\s)(?:[A-Z0-9_]*(?:TOKEN|SECRET|PASSWORD|PASS|KEY|AUTH|CREDENTIAL)[A-Z0-9_]*)=)(?:"[^"]*"|'[^']*'|\S+)/gi,
+      '$1[redacted]',
+    )
+    .replace(
+      /((?:^|\s)--(?:token|access-token|api-key|key|secret|password|pass|authorization|auth|bearer)(?:=|\s+))(?:"[^"]*"|'[^']*'|\S+)/gi,
+      '$1[redacted]',
+    );
+}
+
+function truncateDiagnosticText(value, maxLength = 2000) {
+  const text = String(value || '').trim();
+  if (text.length <= maxLength) return text;
+  return `${text.slice(0, maxLength - 1)}…`;
+}
+
+function buildSourceCommandFailureMessage(sourceName, resolvedCommand, detail) {
+  const safeCommand = redactCommandForDiagnostics(resolvedCommand);
+  const safeDetail = truncateDiagnosticText(detail);
+  return safeCommand
+    ? `Source "${sourceName}" command failed: command \`${safeCommand}\`; ${safeDetail}`
+    : `Source "${sourceName}" command failed: ${safeDetail}`;
 }
 
 function isSudoPasswordPrompt(stderr) {
@@ -1164,6 +1193,18 @@ function getDailyIssueDedupeConfig(config) {
   };
 }
 
+function getDailyRunnerFailureDedupeConfig(config) {
+  const raw = config?.schedule?.dailyRunnerFailureDedupe || config?.notifications?.growthRun?.dailyRunnerFailureDedupe || {};
+  const retentionDays = Number(raw.retentionDays);
+  return {
+    enabled: raw.enabled !== false,
+    retentionDays:
+      Number.isFinite(retentionDays) && retentionDays > 0
+        ? retentionDays
+        : DEFAULT_DAILY_RUNNER_FAILURE_RETENTION_DAYS,
+  };
+}
+
 function resolveDailyIssueDedupeTimeZone(config) {
   return String(
     config?.schedule?.timezone ||
@@ -1171,6 +1212,129 @@ function resolveDailyIssueDedupeTimeZone(config) {
       process.env.TZ ||
       'UTC',
   ).trim() || 'UTC';
+}
+
+function normalizeRunnerFailureForFingerprint(errorMessage) {
+  return redactCommandForDiagnostics(errorMessage)
+    .replace(/\b\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z\b/g, '[timestamp]')
+    .replace(/--since(?:=|\s+)(?:"[^"]*"|'[^']*'|\S+)/g, '--since [timestamp]')
+    .replace(/--until(?:=|\s+)(?:"[^"]*"|'[^']*'|\S+)/g, '--until [timestamp]')
+    .replace(/\bpid\s+\d+\b/gi, 'pid [pid]')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function buildRunnerFailureFingerprint(errorMessage) {
+  return sha256(normalizeRunnerFailureForFingerprint(errorMessage));
+}
+
+function pruneDailyRunnerFailures(failures, now, retentionDays) {
+  const cutoffMs = now.getTime() - retentionDays * 24 * 60 * 60 * 1000;
+  return Object.fromEntries(
+    Object.entries(failures || {}).filter(([, entry]: any) => {
+      const lastSeenMs = Date.parse(String(entry?.lastSeenAt || entry?.firstSeenAt || ''));
+      return !Number.isFinite(lastSeenMs) || lastSeenMs >= cutoffMs;
+    }),
+  );
+}
+
+function parseFailureArgs(argv) {
+  const args = {
+    config: DEFAULT_CONFIG_PATH,
+    state: DEFAULT_STATE_PATH,
+  };
+  for (let i = 0; i < argv.length; i += 1) {
+    const token = argv[i];
+    const next = argv[i + 1];
+    if (token === '--config' && next) {
+      args.config = next;
+      i += 1;
+    } else if (token === '--state' && next) {
+      args.state = next;
+      i += 1;
+    }
+  }
+  return args;
+}
+
+async function recordRunnerFailure({ configPath, statePath, error, argv = [], now = new Date() }) {
+  const errorMessage = truncateDiagnosticText(error instanceof Error ? error.message : String(error));
+  const config = await readJsonOptional(configPath, {});
+  const state = await readJsonOptional(statePath, {
+    sourceHashes: {},
+    lastIssueFingerprint: null,
+    lastRunAt: null,
+    sourceCursors: {},
+  });
+  const dedupeConfig = getDailyRunnerFailureDedupeConfig(config);
+  const timeZone = resolveDailyIssueDedupeTimeZone(config);
+  const date = formatDateInTimeZone(now, timeZone);
+  const fingerprint = buildRunnerFailureFingerprint(errorMessage);
+  const nowIso = now.toISOString();
+  const previousDailyFailures = state?.dailyRunnerFailures?.date === date
+    ? state.dailyRunnerFailures
+    : null;
+  const previousFailures = previousDailyFailures?.failures && typeof previousDailyFailures.failures === 'object'
+    ? previousDailyFailures.failures
+    : {};
+  const failures = pruneDailyRunnerFailures(previousFailures, now, dedupeConfig.retentionDays);
+  const previousEntry: any = failures[fingerprint] || null;
+  const suppressed = dedupeConfig.enabled && Boolean(previousEntry);
+  const nextEntry: Record<string, any> = {
+    ...(previousEntry || {}),
+    fingerprint,
+    error: errorMessage,
+    normalizedError: normalizeRunnerFailureForFingerprint(errorMessage),
+    firstSeenAt: previousEntry?.firstSeenAt || nowIso,
+    lastSeenAt: nowIso,
+  };
+
+  if (suppressed) {
+    nextEntry.suppressedCount = Number(previousEntry?.suppressedCount || 0) + 1;
+  } else {
+    nextEntry.lastReportedAt = nowIso;
+    nextEntry.reportCount = Number(previousEntry?.reportCount || 0) + 1;
+  }
+  failures[fingerprint] = nextEntry;
+
+  const nextState = {
+    ...state,
+    dailyRunnerFailures: {
+      date,
+      timeZone,
+      failures,
+      updatedAt: nowIso,
+    },
+    lastRunnerFailure: {
+      fingerprint,
+      error: errorMessage,
+      failedAt: nowIso,
+      suppressed,
+    },
+  };
+  await fs.mkdir(path.dirname(statePath), { recursive: true });
+  await fs.writeFile(statePath, JSON.stringify(nextState, null, 2), 'utf8');
+  await appendSchedulerProof(suppressed ? 'runner_failed_suppressed' : 'runner_failed', {
+    configPath,
+    statePath,
+    error: errorMessage,
+    errorFingerprint: fingerprint,
+    date,
+    timeZone,
+    argv,
+    suppressed,
+    reportCount: nextEntry.reportCount || 0,
+    suppressedCount: nextEntry.suppressedCount || 0,
+    socialOutput: suppressed ? 'HEARTBEAT_OK' : 'RUNNER_FAILED',
+    socialReason: suppressed
+      ? 'runner failure unchanged and already reported today'
+      : 'new runner failure for current day',
+  });
+  return {
+    suppressed,
+    exitCode: suppressed ? 0 : 1,
+    fingerprint,
+  };
 }
 
 function formatDateInTimeZone(date, timeZone) {
@@ -2078,7 +2242,7 @@ async function resolveSourcePayloadWithCursor(sourceConfig, sourceName, cursorSt
         };
       }
       throw new Error(
-        `Source "${sourceName}" command failed: ${detail}`,
+        buildSourceCommandFailureMessage(sourceName, resolvedCommand, detail),
       );
     }
     const fetchedAt = new Date().toISOString();
@@ -2522,13 +2686,21 @@ async function main() {
       await maybeSelfUpdateFromClawHub(args);
       await runOnce(configPath, statePath);
     } catch (error) {
-      await appendSchedulerProof('runner_failed', {
+      const failureDecision = await recordRunnerFailure({
         configPath,
         statePath,
-        error: error instanceof Error ? error.message : String(error),
-      }).catch(() => {});
+        error,
+        argv: process.argv.slice(2),
+      }).catch(async () => {
+        await appendSchedulerProof('runner_failed', {
+          configPath,
+          statePath,
+          error: error instanceof Error ? error.message : String(error),
+        }).catch(() => {});
+        return null;
+      });
       process.stderr.write(
-        `[${new Date().toISOString()}] Run failed: ${error instanceof Error ? error.message : String(error)}\n`,
+        `[${new Date().toISOString()}] Run failed${failureDecision?.suppressed ? ' (already reported today)' : ''}: ${error instanceof Error ? error.message : String(error)}\n`,
       );
     }
     await sleep(intervalMinutes * 60_000);
@@ -2536,10 +2708,22 @@ async function main() {
 }
 
 main().catch(async (error) => {
-  await appendSchedulerProof('runner_failed', {
-    error: error instanceof Error ? error.message : String(error),
+  const fallbackArgs = parseFailureArgs(process.argv.slice(2));
+  const configPath = path.resolve(fallbackArgs.config);
+  const statePath = path.resolve(fallbackArgs.state);
+  useSchedulerProofPathForStatePath(statePath);
+  const failureDecision = await recordRunnerFailure({
+    configPath,
+    statePath,
+    error,
     argv: process.argv.slice(2),
-  }).catch(() => {});
+  }).catch(async () => {
+    await appendSchedulerProof('runner_failed', {
+      error: error instanceof Error ? error.message : String(error),
+      argv: process.argv.slice(2),
+    }).catch(() => {});
+    return null;
+  });
   process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
-  process.exitCode = 1;
+  process.exitCode = failureDecision?.exitCode ?? 1;
 });

@@ -254,6 +254,7 @@ export function buildOpenClawGrowthSystemEvent(configPath, config = {}) {
     `After the command finishes, inspect ${statePath} and ${proofPath}.`,
     'Always let the runner write state and proof logs. For social/chat output, only summarize new or changed findings, connector-health changes, delivery failures, or runner failures.',
     'If the runner completes with skippedReason cadence_not_due, issue_set_unchanged, or no_data_change, reply exactly HEARTBEAT_OK and do not repeat old findings.',
+    'If the latest proof says runner_failed_suppressed or socialOutput HEARTBEAT_OK, reply exactly HEARTBEAT_OK and do not repeat the earlier runner failure.',
     'Persisted connectorHealth.lastStatusOk=false is not by itself a new event. If the latest proof says connector_health_not_due, connector_health_unchanged, or socialOutput HEARTBEAT_OK, reply exactly HEARTBEAT_OK.',
     'If connector health is healthy, no production issue is found, and no actionable growth finding was generated, reply HEARTBEAT_OK.',
     `Expected OpenClaw cron schedule: ${automation.openclawCron.schedule} ${automation.openclawCron.timezone}.`,
