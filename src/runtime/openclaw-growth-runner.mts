@@ -26,6 +26,7 @@ const DEFAULT_DAILY_ISSUE_EVENT_GROWTH_MULTIPLIER = 2;
 const DEFAULT_DAILY_ISSUE_EVENT_GROWTH_MIN_DELTA = 10;
 const DEFAULT_DAILY_RUNNER_FAILURE_RETENTION_DAYS = 14;
 const SELF_UPDATE_INTERVAL_MS = 24 * 60 * 60 * 1000;
+const SELF_UPDATE_SKILL_SLUG_CANDIDATES = ['growth-engineer', 'openclaw-growth-engineer'];
 const RUNTIME_DIR = path.dirname(fileURLToPath(import.meta.url));
 let schedulerProofPath = path.resolve(DEFAULT_SCHEDULER_PROOF_PATH);
 const DEFAULT_CADENCES = [
@@ -176,6 +177,7 @@ function resolveRuntimeScriptPath(scriptName) {
   const candidates = [
     path.join(RUNTIME_DIR, scriptName),
     path.resolve('scripts', scriptName),
+    path.resolve('skills/growth-engineer/scripts', scriptName),
     path.resolve('skills/openclaw-growth-engineer/scripts', scriptName),
   ];
   return candidates.find((candidate) => existsSync(candidate)) || path.join(RUNTIME_DIR, scriptName);
@@ -303,8 +305,10 @@ function isSentryCompatibleSource(sourceConfig, sourceName) {
 
 function shouldDegradeTransientSourceFailure(sourceConfig, sourceName, retried) {
   if (!retried) return false;
+  if (sourceConfig?.degradeTransientFailures === false) return false;
   if (!isRequiredSource(sourceConfig, sourceName)) return true;
-  return isSentryCompatibleSource(sourceConfig, sourceName);
+  if (isSentryCompatibleSource(sourceConfig, sourceName)) return true;
+  return sourceConfig?.degradeRequiredTransientFailures !== false;
 }
 
 function isTruthyEnv(value) {
@@ -394,6 +398,25 @@ async function rerunCurrentProcessWithoutSelfUpdate() {
   });
 }
 
+function getSelfUpdateSkillCandidates(workspaceRoot) {
+  const explicit = String(process.env.OPENCLAW_GROWTH_SKILL_SLUG || '').trim();
+  const uniqueSlugs = [...new Set([explicit, ...SELF_UPDATE_SKILL_SLUG_CANDIDATES].filter(Boolean))];
+  return uniqueSlugs.map((slug) => {
+    const skillRoot = path.join(workspaceRoot, 'skills', slug);
+    return {
+      slug,
+      skillRoot,
+      originPath: path.join(skillRoot, '.clawhub/origin.json'),
+      runnerPath: path.join(skillRoot, 'scripts/openclaw-growth-runner.mjs'),
+      bootstrapPath: path.join(skillRoot, 'scripts/bootstrap-openclaw-workspace.sh'),
+    };
+  });
+}
+
+function resolveInstalledSelfUpdateSkill(workspaceRoot) {
+  return getSelfUpdateSkillCandidates(workspaceRoot).find((candidate) => existsSync(candidate.originPath)) || null;
+}
+
 async function maybeSelfUpdateFromClawHub(args) {
   if (args.noSelfUpdate) return false;
   if (isTruthyEnv(process.env.OPENCLAW_GROWTH_SKIP_SELF_UPDATE)) return false;
@@ -401,29 +424,30 @@ async function maybeSelfUpdateFromClawHub(args) {
   if (isFalseyEnv(process.env.OPENCLAW_GROWTH_SELF_UPDATE)) return false;
 
   const workspaceRoot = process.cwd();
-  const skillOriginPath = path.join(workspaceRoot, 'skills/openclaw-growth-engineer/.clawhub/origin.json');
-  if (!existsSync(skillOriginPath)) return false;
+  const installedSkill = resolveInstalledSelfUpdateSkill(workspaceRoot);
+  if (!installedSkill) return false;
   if (!(await commandExists('npx'))) return false;
 
   const force = String(process.env.OPENCLAW_GROWTH_SELF_UPDATE || '').trim().toLowerCase() === 'always';
   if (!(await shouldRunSelfUpdate(workspaceRoot, force))) return false;
 
-  const beforeOrigin = await readJsonOptional(skillOriginPath, null);
+  const beforeOrigin = await readJsonOptional(installedSkill.originPath, null);
   const beforeVersion = String(beforeOrigin?.installedVersion || '');
-  process.stdout.write('Checking for OpenClaw Growth Engineer skill updates...\n');
+  process.stdout.write(`Checking for Growth Engineer skill updates (${installedSkill.slug})...\n`);
   const updateResult = await runShellCommand(
-    'npx -y clawhub --no-input --dir skills update openclaw-growth-engineer --force',
+    `npx -y clawhub --no-input --dir skills update ${quote(installedSkill.slug)} --force`,
     120_000,
   );
-  const afterOrigin = await readJsonOptional(skillOriginPath, null);
+  const afterOrigin = await readJsonOptional(installedSkill.originPath, null);
   const afterVersion = String(afterOrigin?.installedVersion || beforeVersion || '');
   const workspaceRunnerPath = path.resolve(process.argv[1] || 'scripts/openclaw-growth-runner.mjs');
-  const skillRunnerPath = path.join(workspaceRoot, 'skills/openclaw-growth-engineer/scripts/openclaw-growth-runner.mjs');
-  const runtimeOutdated = !(await filesHaveSameContent(workspaceRunnerPath, skillRunnerPath));
+  const runtimeOutdated = !(await filesHaveSameContent(workspaceRunnerPath, installedSkill.runnerPath));
 
   await writeSelfUpdateState(workspaceRoot, {
     lastCheckedAt: new Date().toISOString(),
     ok: updateResult.ok,
+    skillSlug: installedSkill.slug,
+    skillRoot: installedSkill.skillRoot,
     previousVersion: beforeVersion || null,
     installedVersion: afterVersion || null,
   }).catch(() => {});
@@ -441,7 +465,7 @@ async function maybeSelfUpdateFromClawHub(args) {
       : 'Refreshing workspace runtime from the installed OpenClaw Growth Engineer skill...\n',
   );
   const bootstrapResult = await runShellCommand(
-    'bash skills/openclaw-growth-engineer/scripts/bootstrap-openclaw-workspace.sh',
+    `bash ${quote(installedSkill.bootstrapPath)}`,
     60_000,
   );
   if (!bootstrapResult.ok) {

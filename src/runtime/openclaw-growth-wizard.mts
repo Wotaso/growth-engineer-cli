@@ -25,6 +25,7 @@ import { loadOpenClawGrowthSecrets } from './openclaw-growth-env.mjs';
 
 const DEFAULT_CONFIG_PATH = 'data/openclaw-growth-engineer/config.json';
 const SELF_UPDATE_INTERVAL_MS = 24 * 60 * 60 * 1000;
+const SELF_UPDATE_SKILL_SLUG_CANDIDATES = ['growth-engineer', 'openclaw-growth-engineer'];
 const ENABLE_ISOLATED_SECRET_RUNNER_WIZARD = false;
 const DEFAULT_GROWTH_INTERVAL_MINUTES = 90;
 const DEFAULT_CONNECTOR_HEALTH_INTERVAL_MINUTES = 360;
@@ -926,6 +927,7 @@ function resolveRuntimeScriptPath(scriptName) {
   const candidates = [
     path.join(RUNTIME_DIR, scriptName),
     path.resolve('scripts', scriptName),
+    path.resolve('skills/growth-engineer/scripts', scriptName),
     path.resolve('skills/openclaw-growth-engineer/scripts', scriptName),
   ];
   return candidates.find((candidate) => existsSync(candidate)) || path.join(RUNTIME_DIR, scriptName);
@@ -1175,8 +1177,6 @@ async function askConnectorSelectionByText(
     for (const connector of group.connectors) {
       const number = CONNECTOR_DEFINITIONS.findIndex((entry) => entry.key === connector.key) + 1;
       process.stdout.write(`  ${number}) ${connector.label}\n`);
-      writeWrapped(formatConnectorHealthText(connector.key, healthByConnector), '     ', ANSI.dim);
-      writeWrapped(connector.summary, '     ');
     }
     process.stdout.write('\n');
   }
@@ -1657,13 +1657,14 @@ function connectorStatusLabel(key: ConnectorKey, healthByConnector: Record<strin
   const health = getConnectorHealth(key, healthByConnector);
   const configured = isConnectorLocallyConfigured(key);
   if (health.status === 'connected') return configured ? 'configured, healthy' : 'healthy via local tool auth';
-  if (!configured) return 'not configured';
+  if (!configured) return '';
   return `configured, ${connectorHealthLabel(health.status)}`;
 }
 
 function formatConnectorHealthText(key: ConnectorKey, healthByConnector: Record<string, any> = {}) {
   const health = getConnectorHealth(key, healthByConnector);
   const label = connectorStatusLabel(key, healthByConnector);
+  if (!label) return '';
   const detail = health.detail ? ` - ${health.detail}` : '';
   return `Status: ${label}${detail}`;
 }
@@ -1833,11 +1834,9 @@ function renderConnectorPicker(
       const label = `${connector.label}${suffix}`;
       const title = active ? `${ANSI.bold}${label}${ANSI.reset}` : label;
       process.stdout.write(`${pointer} ${box} ${title}\n`);
-      writeWrapped(connector.summary, '    ');
-      writeWrapped(formatConnectorHealthText(connector.key, healthByConnector), '    ', ANSI.dim);
-      process.stdout.write('\n');
       index += 1;
     }
+    process.stdout.write('\n');
   }
 
   if (warning) {
@@ -2326,8 +2325,7 @@ async function askListSelection(rl, label, entries, options: Record<string, any>
   const includeManual = Boolean(options.includeManual);
   const includeDefer = Boolean(options.includeDefer);
   entries.forEach((entry, index) => {
-    const description = entry.description ? ` - ${entry.description}` : '';
-    process.stdout.write(`  ${index + 1}) ${entry.label}${description}\n`);
+    process.stdout.write(`  ${index + 1}) ${entry.label}\n`);
   });
   const manualIndex = includeManual ? entries.length + 1 : null;
   const deferIndex = includeDefer ? entries.length + (includeManual ? 2 : 1) : null;
@@ -4044,6 +4042,25 @@ async function filesHaveSameContent(leftPath, rightPath) {
   }
 }
 
+function getSelfUpdateSkillCandidates(workspaceRoot) {
+  const explicit = String(process.env.OPENCLAW_GROWTH_SKILL_SLUG || '').trim();
+  const uniqueSlugs = [...new Set([explicit, ...SELF_UPDATE_SKILL_SLUG_CANDIDATES].filter(Boolean))];
+  return uniqueSlugs.map((slug) => {
+    const skillRoot = path.join(workspaceRoot, 'skills', slug);
+    return {
+      slug,
+      skillRoot,
+      originPath: path.join(skillRoot, '.clawhub/origin.json'),
+      wizardPath: path.join(skillRoot, 'scripts/openclaw-growth-wizard.mjs'),
+      bootstrapPath: path.join(skillRoot, 'scripts/bootstrap-openclaw-workspace.sh'),
+    };
+  });
+}
+
+function resolveInstalledSelfUpdateSkill(workspaceRoot) {
+  return getSelfUpdateSkillCandidates(workspaceRoot).find((candidate) => existsSync(candidate.originPath)) || null;
+}
+
 async function maybeSelfUpdateFromClawHub(args) {
   if (args.noSelfUpdate) return false;
   if (isTruthyEnv(process.env.OPENCLAW_GROWTH_SKIP_SELF_UPDATE)) return false;
@@ -4051,30 +4068,31 @@ async function maybeSelfUpdateFromClawHub(args) {
   if (isFalseyEnv(process.env.OPENCLAW_GROWTH_SELF_UPDATE)) return false;
 
   const workspaceRoot = process.cwd();
-  const skillOriginPath = path.join(workspaceRoot, 'skills/openclaw-growth-engineer/.clawhub/origin.json');
-  if (!(await fileExists(skillOriginPath))) return false;
+  const installedSkill = resolveInstalledSelfUpdateSkill(workspaceRoot);
+  if (!installedSkill) return false;
   if (!(await commandExists('npx'))) return false;
 
   const force = String(process.env.OPENCLAW_GROWTH_SELF_UPDATE || '').trim().toLowerCase() === 'always';
   if (!(await shouldRunSelfUpdate(workspaceRoot, force))) return false;
 
-  const beforeOrigin = await readJsonIfPresent(skillOriginPath).catch(() => null);
+  const beforeOrigin = await readJsonIfPresent(installedSkill.originPath).catch(() => null);
   const beforeVersion = String(beforeOrigin?.installedVersion || '');
-  process.stdout.write('Checking for OpenClaw Growth Engineer skill updates...\n');
+  process.stdout.write(`Checking for Growth Engineer skill updates (${installedSkill.slug})...\n`);
 
   const updateResult = await runCommandCaptureWithTimeout(
-    'npx -y clawhub --no-input --dir skills update openclaw-growth-engineer --force',
+    `npx -y clawhub --no-input --dir skills update ${quote(installedSkill.slug)} --force`,
     { timeoutMs: 120_000 },
   );
-  const afterOrigin = await readJsonIfPresent(skillOriginPath).catch(() => null);
+  const afterOrigin = await readJsonIfPresent(installedSkill.originPath).catch(() => null);
   const afterVersion = String(afterOrigin?.installedVersion || beforeVersion || '');
   const workspaceWizardPath = path.resolve(process.argv[1] || 'scripts/openclaw-growth-wizard.mjs');
-  const skillWizardPath = path.join(workspaceRoot, 'skills/openclaw-growth-engineer/scripts/openclaw-growth-wizard.mjs');
-  const runtimeOutdated = !(await filesHaveSameContent(workspaceWizardPath, skillWizardPath));
+  const runtimeOutdated = !(await filesHaveSameContent(workspaceWizardPath, installedSkill.wizardPath));
 
   await writeSelfUpdateState(workspaceRoot, {
     lastCheckedAt: new Date().toISOString(),
     ok: updateResult.ok,
+    skillSlug: installedSkill.slug,
+    skillRoot: installedSkill.skillRoot,
     previousVersion: beforeVersion || null,
     installedVersion: afterVersion || null,
   }).catch(() => {});
@@ -4094,7 +4112,7 @@ async function maybeSelfUpdateFromClawHub(args) {
     process.stdout.write('Refreshing workspace runtime from the installed OpenClaw Growth Engineer skill...\n');
   }
   const bootstrapResult = await runCommandCaptureWithTimeout(
-    'bash skills/openclaw-growth-engineer/scripts/bootstrap-openclaw-workspace.sh',
+    `bash ${quote(installedSkill.bootstrapPath)}`,
     { timeoutMs: 60_000 },
   );
   if (!bootstrapResult.ok) {
