@@ -57,4 +57,16 @@ jobs:
         run: npm publish --access public --tag "${{ steps.meta.outputs.tag }}" --provenance
 
       - name: Verify
-        run: npm view "@analyticscli/growth-engineer@${{ steps.meta.outputs.version }}" version dist-tags --json
+        run: |
+          version="${{ steps.meta.outputs.version }}"
+          for attempt in {1..12}; do
+            if npm view "@analyticscli/growth-engineer@${version}" version >/dev/null 2>&1; then
+              npm view "@analyticscli/growth-engineer@${version}" version dist-tags --json
+              exit 0
+            fi
+            echo "npm registry not visible yet; retry ${attempt}/12"
+            sleep 10
+          done
+
+          echo "Package is still not publicly visible on npm after retries." >&2
+          exit 1
