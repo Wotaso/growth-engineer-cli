@@ -720,7 +720,7 @@ function renderHeartbeatBlock(configPath, config) {
   const displayConfigPath = relativeWorkspacePath(configPath);
   const displayStatePath = deriveStatePathFromConfigPath(displayConfigPath);
   const runnerCommand = buildGrowthRunnerCommand(displayConfigPath, displayStatePath);
-  const wizardCommand = 'npx -y Wotaso/growth-engineer-cli#main wizard --connectors';
+  const wizardCommand = 'npx -y @analyticscli/growth-engineer@preview wizard --connectors';
   return `${HEARTBEAT_MARKER_START}
 tasks:
 
@@ -2039,7 +2039,7 @@ function remediationForCheck(checkName, configPath) {
     return 'Write `data/openclaw-growth-engineer/analytics_summary.json` via your analytics refresh step (API-key based source command/file generation).';
   }
   if (checkName === 'connection:analytics') {
-    return 'Run `npx -y Wotaso/growth-engineer-cli#main wizard --connectors analytics` and paste a fresh AnalyticsCLI readonly CLI token into the local terminal wizard.';
+    return 'Run `npx -y @analyticscli/growth-engineer@preview wizard --connectors analytics` and paste a fresh AnalyticsCLI readonly CLI token into the local terminal wizard.';
   }
   if (checkName === 'connection:github') {
     return 'Verify `GITHUB_TOKEN` and repo access to `/repos/<owner>/<repo>` + issues API.';

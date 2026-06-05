@@ -803,7 +803,7 @@ async function testPaddleConnection(paddleToken, timeoutMs) {
 
 function describeAnalyticsConnectionFailure(detail, analyticsTokenEnv, hasAnalyticsToken) {
   if (!hasAnalyticsToken) {
-    return `AnalyticsCLI needs query access. Run \`npx -y Wotaso/growth-engineer-cli#main wizard --connectors analytics\`, create or copy a readonly CLI token in dash.analyticscli.com -> API Keys, and paste it into the local terminal wizard. Raw error: ${detail}`;
+    return `AnalyticsCLI needs query access. Run \`npx -y @analyticscli/growth-engineer@preview wizard --connectors analytics\`, create or copy a readonly CLI token in dash.analyticscli.com -> API Keys, and paste it into the local terminal wizard. Raw error: ${detail}`;
   }
 
   return `AnalyticsCLI connection failed with \`${analyticsTokenEnv}\` set. Verify that the pasted readonly CLI token is current and has project access. Raw error: ${detail}`;
