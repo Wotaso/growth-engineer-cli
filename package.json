@@ -25,6 +25,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json && mkdir -p dist/runtime && cp src/runtime/*.py dist/runtime/",
     "dev": "tsx src/index.ts",
+    "prepare": "npm run build",
     "prepack": "npm run build",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
