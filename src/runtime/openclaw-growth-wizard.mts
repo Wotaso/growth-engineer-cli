@@ -31,7 +31,7 @@ const DEFAULT_GROWTH_INTERVAL_MINUTES = 90;
 const DEFAULT_CONNECTOR_HEALTH_INTERVAL_MINUTES = 360;
 const DEFAULT_SCHEDULER_PROOF_PATH = 'data/openclaw-growth-engineer/runtime/scheduler-proof.jsonl';
 const GROWTH_ENGINEER_PACKAGE_SPEC =
-  process.env.OPENCLAW_GROWTH_ENGINEER_PACKAGE || '@analyticscli/growth-engineer@preview';
+  process.env.OPENCLAW_GROWTH_ENGINEER_PACKAGE || 'Wotaso/growth-engineer-cli#main';
 const RUNTIME_DIR = path.dirname(fileURLToPath(import.meta.url));
 const ACCOUNT_SIGNAL_CONNECTOR_KEYS = [
   'stripe',
@@ -903,8 +903,8 @@ function printHelpAndExit(exitCode, reason = null) {
 OpenClaw Growth Setup Wizard
 
 Usage:
-  npx -y @analyticscli/growth-engineer@preview wizard [--out <config-path>]
-  npx -y @analyticscli/growth-engineer@preview wizard --connectors [${CONNECTOR_KEYS.join(',')}]
+  npx -y Wotaso/growth-engineer-cli#main wizard [--out <config-path>]
+  npx -y Wotaso/growth-engineer-cli#main wizard --connectors [${CONNECTOR_KEYS.join(',')}]
 
 Compatibility note:
   Existing cron/heartbeat runners may still execute generated runtime scripts, but user-facing setup and connector repair should use the npx command above.
@@ -5432,7 +5432,7 @@ async function writeOpenClawJobManifest(configPath, config) {
       openClawCanEditOutputDelivery: true,
       openClawCanEditConnectors: true,
       openClawCanEditConnectorSecrets: false,
-      connectorChanges: 'OpenClaw may read and modify non-secret connector config such as enabled flags, source commands, project/app mappings, and source priorities. Use `npx -y @analyticscli/growth-engineer@preview wizard --connectors` for API keys or other connector secrets; never write secret values into config files, manifests, issues, PRs, or chat output.',
+      connectorChanges: 'OpenClaw may read and modify non-secret connector config such as enabled flags, source commands, project/app mappings, and source priorities. Use `npx -y Wotaso/growth-engineer-cli#main wizard --connectors` for API keys or other connector secrets; never write secret values into config files, manifests, issues, PRs, or chat output.',
       secretAccessMode: config?.security?.connectorSecrets?.mode || 'local-user-file',
       secretPolicy: config?.security?.connectorSecrets?.mode === 'isolated-runner'
         ? 'OpenClaw must use the allowlisted sudo wrapper commands and must not read the persisted secret file.'
