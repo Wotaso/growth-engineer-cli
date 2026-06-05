@@ -985,7 +985,9 @@ function sourceCommandNeedsActiveConfig(sourceName, command) {
   return (
     normalized === 'sentry' ||
     normalized === 'glitchtip' ||
+    normalized === 'paddle' ||
     normalized === 'coolify' ||
+    value.includes('export-paddle-summary') ||
     value.includes('export-sentry-summary') ||
     value.includes('export-coolify-summary') ||
     value.includes('exporters coolify-summary')
@@ -2607,9 +2609,13 @@ async function runImmediateConnectorHealthCheck({
   connector,
   secrets,
   sentryAccounts = [],
+  paddleAccounts = [],
 }) {
   if (connector === 'sentry' && sentryAccounts.length > 0) {
     await upsertSentryAccountsConfig(configPath, sentryAccounts);
+  }
+  if (connector === 'paddle' && paddleAccounts.length > 0) {
+    await upsertPaddleAccountsConfig(configPath, paddleAccounts);
   }
   await saveSecretsImmediately(secrets);
 
@@ -3351,6 +3357,73 @@ async function verifySentryAccountsConfig(configPath, expectedAccounts) {
   return { ok: true, detail: `${realAccounts.length} active Sentry-compatible account(s) configured` };
 }
 
+async function upsertPaddleAccountsConfig(configPath, accounts) {
+  if (!accounts.length || !(await fileExists(configPath))) return false;
+  const config = await readJsonFile(configPath);
+  const existingAccounts = Array.isArray(config?.sources?.paddle?.accounts)
+    ? config.sources.paddle.accounts
+    : [];
+  const merged = new Map();
+  for (const account of existingAccounts) {
+    const id = String(account?.id || account?.key || account?.label || '').trim();
+    if (id) merged.set(id, account);
+  }
+  for (const account of accounts) {
+    merged.set(account.id, {
+      ...(merged.get(account.id) || {}),
+      ...account,
+    });
+  }
+
+  const tokenEnv = accounts[0]?.tokenEnv || config?.sources?.paddle?.tokenEnv || config?.secrets?.paddleTokenEnv || 'PADDLE_API_KEY';
+  config.sources = {
+    ...(config.sources || {}),
+    paddle: {
+      ...(config.sources?.paddle || {}),
+      enabled: true,
+      mode: 'command',
+      command: normalizeWizardSourceCommand('paddle', config.sources?.paddle || {}, configPath),
+      environment: config.sources?.paddle?.environment || 'live',
+      tokenEnv,
+      accounts: [...merged.values()],
+    },
+  };
+  config.secrets = {
+    ...(config.secrets || {}),
+    paddleTokenEnv: tokenEnv,
+    paddleTokenRef: { source: 'env', provider: 'default', id: tokenEnv },
+  };
+
+  await writeJsonFile(configPath, config);
+  return true;
+}
+
+async function verifyPaddleAccountsConfig(configPath, expectedAccounts) {
+  if (!(await fileExists(configPath))) {
+    return { ok: false, detail: `${configPath} does not exist` };
+  }
+  const config = await readJsonFile(configPath);
+  const source = config?.sources?.paddle;
+  if (!source || source.enabled !== true) {
+    return { ok: false, detail: 'sources.paddle.enabled is not true' };
+  }
+  if (source.mode !== 'command') {
+    return { ok: false, detail: 'sources.paddle.mode is not command' };
+  }
+  const configuredAccounts = Array.isArray(source.accounts) ? source.accounts : [];
+  if (configuredAccounts.length === 0) {
+    return { ok: false, detail: 'sources.paddle.accounts contains no account' };
+  }
+  const configuredIds = new Set(configuredAccounts.map((account) => String(account?.id || account?.key || '').trim()).filter(Boolean));
+  const missingIds = expectedAccounts
+    .map((account) => String(account?.id || '').trim())
+    .filter((id) => id && !configuredIds.has(id));
+  if (missingIds.length > 0) {
+    return { ok: false, detail: `sources.paddle.accounts is missing configured account id(s): ${missingIds.join(', ')}` };
+  }
+  return { ok: true, detail: `${configuredAccounts.length} Paddle account(s) configured` };
+}
+
 async function upsertCoolifyConfig(configPath, { baseUrl, tokenEnv = 'COOLIFY_API_TOKEN' }) {
   if (!(await fileExists(configPath))) return false;
   const coolifyCommand = `${getWizardDefaultSourceCommand('coolify')} --config ${quote(configPath)}`;
@@ -3673,6 +3746,22 @@ async function guideRevenueCatConnector(rl, secrets: Record<string, string>) {
   if (apiKey) secrets.REVENUECAT_API_KEY = apiKey;
 }
 
+function paddleAccountIdFromLabel(label, index) {
+  const normalized = String(label || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '');
+  return normalized || `paddle_${index + 1}`;
+}
+
+function paddleTokenEnvForAccount(index, label) {
+  if (index === 0) return 'PADDLE_API_KEY';
+  const suffix = paddleAccountIdFromLabel(label, index).toUpperCase().replace(/[^A-Z0-9]+/g, '_');
+  const base = suffix && suffix !== `PADDLE_${index + 1}` ? `PADDLE_API_KEY_${suffix}` : `PADDLE_API_KEY_${index + 1}`;
+  return base.replace(/_+/g, '_');
+}
+
 async function guidePaddleConnector(rl, secrets: Record<string, string>) {
   printSection('Paddle Billing metrics', [
     'Use this when OpenClaw should read web checkout, revenue, MRR, refunds, chargebacks, and active subscriber metrics.',
@@ -3685,8 +3774,25 @@ async function guidePaddleConnector(rl, secrets: Record<string, string>) {
     'Do not select or hard-code a single product in the wizard; the Growth Engineer should keep account-level metrics context.',
     'Paste the key here so it is stored only in the local chmod 600 secrets file.',
   ]);
-  const apiKey = await maybePromptSecret(rl, 'Paste PADDLE_API_KEY into this local terminal', 'PADDLE_API_KEY');
-  if (apiKey) secrets.PADDLE_API_KEY = apiKey;
+  const accounts = [];
+  let index = 0;
+  while (true) {
+    const label = await ask(rl, index === 0 ? 'Paddle account label' : 'Next Paddle account label (empty = done)', index === 0 ? 'Paddle' : '');
+    if (!label.trim()) break;
+    const tokenEnv = paddleTokenEnvForAccount(index, label);
+    const apiKey = await maybePromptSecret(rl, `Paste ${tokenEnv} into this local terminal`, tokenEnv);
+    if (apiKey) secrets[tokenEnv] = apiKey;
+    accounts.push({
+      id: paddleAccountIdFromLabel(label, index),
+      label: label.trim(),
+      tokenEnv,
+      environment: 'live',
+    });
+    index += 1;
+    const addAnother = await askYesNo(rl, 'Add another Paddle account?', false);
+    if (!addAnother) break;
+  }
+  return accounts;
 }
 
 async function guideSeoConnector(rl, secrets: Record<string, string>) {
@@ -3720,9 +3826,18 @@ async function guideSeoConnector(rl, secrets: Record<string, string>) {
   }
 }
 
-function buildAccountSignalExtraSourceConfig(key: AccountSignalConnectorKey, existing: Record<string, any> = {}) {
+function buildAccountSignalExtraSourceConfig(
+  key: AccountSignalConnectorKey,
+  existing: Record<string, any> = {},
+  accounts: any[] = [],
+) {
   const definition = getAccountSignalConnectorDefinition(key);
   if (!definition) return existing;
+  const accountConfig = accounts.length > 0
+    ? {
+        accounts: mergeConnectorAccounts(existing.accounts, accounts),
+      }
+    : {};
   return {
     ...buildExtraSourceConfig(definition.service, {
       key: definition.key,
@@ -3746,10 +3861,28 @@ function buildAccountSignalExtraSourceConfig(key: AccountSignalConnectorKey, exi
     signalKind: definition.sourceKind,
     experimental: Boolean(definition.experimental),
     hint: existing.hint || definition.signalHint,
+    ...accountConfig,
   };
 }
 
-async function upsertAccountSignalConnectorConfig(configPath, key: AccountSignalConnectorKey) {
+function mergeConnectorAccounts(existingAccounts, nextAccounts) {
+  const merged = new Map();
+  for (const account of Array.isArray(existingAccounts) ? existingAccounts : []) {
+    const id = String(account?.id || account?.key || account?.label || '').trim();
+    if (id) merged.set(id, account);
+  }
+  for (const account of nextAccounts) {
+    const id = String(account?.id || account?.key || account?.label || '').trim();
+    if (!id) continue;
+    merged.set(id, {
+      ...(merged.get(id) || {}),
+      ...account,
+    });
+  }
+  return [...merged.values()];
+}
+
+async function upsertAccountSignalConnectorConfig(configPath, key: AccountSignalConnectorKey, accounts: any[] = []) {
   const definition = getAccountSignalConnectorDefinition(key);
   if (!definition) return false;
   const config = await loadEditableConfig(configPath);
@@ -3757,7 +3890,7 @@ async function upsertAccountSignalConnectorConfig(configPath, key: AccountSignal
   const extra = Array.isArray(sources.extra) ? sources.extra : [];
   const nextExtra = extra.filter((source) => String(source?.key || source?.service || '') !== definition.key);
   const existing = extra.find((source) => String(source?.key || source?.service || '') === definition.key) || {};
-  nextExtra.push(buildAccountSignalExtraSourceConfig(key, existing));
+  nextExtra.push(buildAccountSignalExtraSourceConfig(key, existing, accounts));
   config.sources = {
     ...sources,
     extra: nextExtra,
@@ -3766,26 +3899,63 @@ async function upsertAccountSignalConnectorConfig(configPath, key: AccountSignal
   return true;
 }
 
+function accountSignalTokenEnvForAccount(baseEnv, key, index, label) {
+  if (index === 0) return baseEnv;
+  const suffix = toConfigId(label || key, `${key}_${index + 1}`).toUpperCase().replace(/[^A-Z0-9]+/g, '_');
+  return `${baseEnv}_${suffix}`.replace(/_+/g, '_');
+}
+
 async function guideAccountSignalConnector(rl, secrets: Record<string, string>, key: AccountSignalConnectorKey) {
   const definition = getAccountSignalConnectorDefinition(key);
-  if (!definition) return;
+  if (!definition) return [];
   printSection(definition.label, [
     definition.summary,
     'Setup is account-wide. Do not paste project IDs, app IDs, product IDs, package names, paywall IDs, service names, or tags here.',
   ]);
   process.stdout.write(`Docs: ${definition.docsUrl}\n\n`);
   printBullets(definition.steps);
-  for (const credential of definition.credentials) {
-    const defaultValue = credential.defaultValue ?? process.env[credential.env] ?? '';
-    const value = credential.optional
-      ? await maybePromptSecret(rl, credential.prompt, credential.env)
-      : await maybePromptSecret(rl, credential.prompt, credential.env);
-    const finalValue = value || defaultValue;
-    if (finalValue) secrets[credential.env] = finalValue;
-    else if (!credential.optional) {
-      process.stdout.write(`${credential.env} was not saved. ${definition.label} setup remains pending; rerun this wizard when ready.\n`);
+
+  const accounts = [];
+  let index = 0;
+  while (true) {
+    const label = await ask(
+      rl,
+      index === 0 ? `${definition.label} account label` : `Next ${definition.label} account label (empty = done)`,
+      index === 0 ? definition.label.replace(/\s+\(experimental\)$/i, '') : '',
+    );
+    if (!label.trim()) break;
+
+    const credentialEnvs = {};
+    for (const credential of definition.credentials) {
+      const envName = accountSignalTokenEnvForAccount(credential.env, key, index, label);
+      const defaultValue = index === 0 ? credential.defaultValue ?? process.env[credential.env] ?? '' : '';
+      const prompt = envName === credential.env ? credential.prompt : `${credential.prompt.replace(credential.env, envName)}`;
+      const value = credential.optional
+        ? await maybePromptSecret(rl, prompt, envName)
+        : await maybePromptSecret(rl, prompt, envName);
+      const finalValue = value || defaultValue;
+      credentialEnvs[credential.env] = envName;
+      if (finalValue) secrets[envName] = finalValue;
+      else if (!credential.optional) {
+        process.stdout.write(`${envName} was not saved. ${definition.label} setup remains pending for ${label}; rerun this wizard when ready.\n`);
+      }
     }
+
+    accounts.push({
+      id: toConfigId(label, `${key}_${index + 1}`),
+      label: label.trim(),
+      credentialEnvs,
+      tokenEnv: credentialEnvs[definition.credentials[0]?.env] || definition.credentials[0]?.env || null,
+      accountWide: true,
+      projectScope: 'discover_from_account',
+    });
+
+    index += 1;
+    const addAnother = await askYesNo(rl, `Add another ${definition.label} account?`, false);
+    if (!addAnother) break;
   }
+
+  return accounts;
 }
 
 async function guideSentryConnector(rl, secrets: Record<string, string>) {
@@ -4148,6 +4318,7 @@ async function runConnectorSetupSteps({
 
   const secrets: Record<string, string> = {};
   let sentryAccounts: any[] = [];
+  let paddleAccounts: any[] = [];
   let coolifyConfig: any = null;
   if (selected.includes('analytics')) {
     let forceFreshAnalyticsToken = shouldForceFreshAnalyticsToken(healthByConnector);
@@ -4193,12 +4364,13 @@ async function runConnectorSetupSteps({
   if (selected.includes('paddle')) {
     while (true) {
       clearTerminal();
-      await guidePaddleConnector(rl, secrets);
+      paddleAccounts = await guidePaddleConnector(rl, secrets);
       const check = await runImmediateConnectorHealthCheck({
         rl,
         configPath: args.config,
         connector: 'paddle',
         secrets,
+        paddleAccounts,
       });
       if (!check.retry) break;
     }
@@ -4262,8 +4434,8 @@ async function runConnectorSetupSteps({
   for (const connector of selected.filter(isAccountSignalConnector)) {
     while (true) {
       clearTerminal();
-      await guideAccountSignalConnector(rl, secrets, connector);
-      await upsertAccountSignalConnectorConfig(args.config, connector);
+      const accountSignalAccounts = await guideAccountSignalConnector(rl, secrets, connector);
+      await upsertAccountSignalConnectorConfig(args.config, connector, accountSignalAccounts);
       const check = await runImmediateConnectorHealthCheck({
         rl,
         configPath: args.config,
@@ -4290,6 +4462,12 @@ async function runConnectorSetupSteps({
       process.stdout.write(`Configured ${sentryAccounts.length} Sentry-compatible account(s) in ${args.config}.\n`);
     }
   }
+  if (paddleAccounts.length > 0 && await upsertPaddleAccountsConfig(args.config, paddleAccounts)) {
+    const readiness = await verifyPaddleAccountsConfig(args.config, paddleAccounts);
+    if (readiness.ok) {
+      process.stdout.write(`Configured ${paddleAccounts.length} Paddle account(s) in ${args.config}.\n`);
+    }
+  }
   if (coolifyConfig?.baseUrl && await upsertCoolifyConfig(args.config, coolifyConfig)) {
     process.stdout.write(`Configured Coolify monitoring for ${coolifyConfig.baseUrl} in ${args.config}.\n`);
   }
@@ -4312,6 +4490,18 @@ async function runConnectorSetupSteps({
         check: 'connection:sentry',
         detail: readiness.detail,
         remediation: 'Rerun Sentry/GlitchTip setup so the active config persists sources.sentry.enabled=true and sources.sentry.accounts[].',
+      });
+    }
+  }
+  if (paddleAccounts.length > 0 && await upsertPaddleAccountsConfig(args.config, paddleAccounts)) {
+    const readiness = await verifyPaddleAccountsConfig(args.config, paddleAccounts);
+    if (readiness.ok) {
+      process.stdout.write(`Paddle account config is up to date in ${args.config}.\n`);
+    } else {
+      postSetupBlockers.push({
+        check: 'connection:paddle',
+        detail: readiness.detail,
+        remediation: 'Rerun Paddle setup so the active config persists sources.paddle.enabled=true and sources.paddle.accounts[].',
       });
     }
   }

@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import { promises as fs } from 'node:fs';
 import process from 'node:process';
 import { buildPaddleSummary, writeJsonOutput } from './openclaw-exporters-lib.mjs';
 import { loadOpenClawGrowthSecrets } from './openclaw-growth-env.mjs';
@@ -21,6 +22,7 @@ Options:
   --from <date>                Start date YYYY-MM-DD (default: 30 days before --to)
   --to <date>                  End date YYYY-MM-DD, exclusive in Paddle metrics (default: today UTC)
   --last <duration>            Relative window like 30d (used when --from is omitted)
+  --config <file>              Growth config path for sources.paddle.accounts[]
   --out <file>                 Write JSON to file instead of stdout
   --max-signals <n>            Maximum signals to emit (default: 6)
   --help, -h                   Show help
@@ -55,6 +57,7 @@ function parseArgs(argv) {
     from: '',
     to: defaultTo,
     last: '30d',
+    config: String(process.env.OPENCLAW_GROWTH_CONFIG_PATH || '').trim(),
     out: '',
     maxSignals: 6,
   };
@@ -75,6 +78,9 @@ function parseArgs(argv) {
       index += 1;
     } else if (token === '--last') {
       args.last = String(next || '').trim() || args.last;
+      index += 1;
+    } else if (token === '--config') {
+      args.config = String(next || '').trim();
       index += 1;
     } else if (token === '--out') {
       args.out = String(next || '').trim();
@@ -113,10 +119,49 @@ function buildUrl(baseUrl, pathname, args) {
   return url.toString();
 }
 
-async function fetchPaddleMetric(baseUrl, pathname, args) {
-  const token = String(process.env.PADDLE_API_KEY || '').trim();
+async function readJsonIfPresent(filePath) {
+  if (!filePath) return null;
+  try {
+    return JSON.parse(await fs.readFile(filePath, 'utf8'));
+  } catch {
+    return null;
+  }
+}
+
+function normalizePaddleAccount(account, index, source, args) {
+  const id = String(account?.id || account?.key || account?.label || `paddle_${index + 1}`)
+    .trim()
+    .replace(/[^a-zA-Z0-9._-]+/g, '_');
+  return {
+    id,
+    label: String(account?.label || account?.name || account?.id || `Paddle ${index + 1}`).trim(),
+    tokenEnv: String(account?.tokenEnv || account?.token_env || account?.secretEnv || (index === 0 ? source?.tokenEnv || 'PADDLE_API_KEY' : `PADDLE_API_KEY_${index + 1}`)).trim(),
+    environment: String(account?.environment || source?.environment || args.environment || 'live').trim().toLowerCase() || 'live',
+  };
+}
+
+async function resolvePaddleAccounts(args) {
+  const config = await readJsonIfPresent(args.config);
+  const source = config?.sources?.paddle || {};
+  const accounts = Array.isArray(source.accounts) ? source.accounts : [];
+  if (accounts.length > 0) {
+    return accounts.map((account, index) => normalizePaddleAccount(account, index, source, args));
+  }
+  const tokenEnv = String(source.tokenEnv || config?.secrets?.paddleTokenEnv || 'PADDLE_API_KEY').trim();
+  return [
+    {
+      id: 'paddle',
+      label: 'Paddle',
+      tokenEnv,
+      environment: String(source.environment || args.environment || 'live').trim().toLowerCase() || 'live',
+    },
+  ];
+}
+
+async function fetchPaddleMetric(baseUrl, pathname, args, tokenEnv) {
+  const token = String(process.env[tokenEnv] || '').trim();
   if (!token) {
-    throw new Error('Missing PADDLE_API_KEY. Rerun the connector wizard and paste a Paddle API key from Developer Tools > Authentication.');
+    throw new Error(`Missing ${tokenEnv}. Rerun the connector wizard and paste a Paddle API key from Developer Tools > Authentication v2.`);
   }
 
   const response = await fetch(buildUrl(baseUrl, pathname, args), {
@@ -135,36 +180,46 @@ async function fetchPaddleMetric(baseUrl, pathname, args) {
   return body.trim() ? JSON.parse(body) : {};
 }
 
-async function fetchOptionalMetric(baseUrl, pathname, key, args, warnings) {
+async function fetchOptionalMetric(baseUrl, pathname, key, args, warnings, tokenEnv) {
   try {
-    return [key, await fetchPaddleMetric(baseUrl, pathname, args)];
+    return [key, await fetchPaddleMetric(baseUrl, pathname, args, tokenEnv)];
   } catch (error) {
     warnings.push(`${key}: ${error instanceof Error ? error.message : String(error)}`);
     return [key, null];
   }
 }
 
-async function main() {
-  await loadOpenClawGrowthSecrets();
-  const args = parseArgs(process.argv.slice(2));
-  const baseUrl = paddleBaseUrl(args.environment);
+async function fetchAccountSummary(args, account) {
+  const environment = ['live', 'sandbox'].includes(account.environment) ? account.environment : args.environment;
+  const baseUrl = paddleBaseUrl(environment);
   const warnings = [];
   const pairs = await Promise.all([
-    fetchOptionalMetric(baseUrl, '/metrics/revenue', 'revenue', args, warnings),
-    fetchOptionalMetric(baseUrl, '/metrics/monthly-recurring-revenue', 'monthlyRecurringRevenue', args, warnings),
-    fetchOptionalMetric(baseUrl, '/metrics/active-subscribers', 'activeSubscribers', args, warnings),
-    fetchOptionalMetric(baseUrl, '/metrics/refunds', 'refunds', args, warnings),
-    fetchOptionalMetric(baseUrl, '/metrics/chargebacks', 'chargebacks', args, warnings),
-    fetchOptionalMetric(baseUrl, '/metrics/checkout-conversion', 'checkoutConversion', args, warnings),
+    fetchOptionalMetric(baseUrl, '/metrics/revenue', 'revenue', args, warnings, account.tokenEnv),
+    fetchOptionalMetric(baseUrl, '/metrics/monthly-recurring-revenue', 'monthlyRecurringRevenue', args, warnings, account.tokenEnv),
+    fetchOptionalMetric(baseUrl, '/metrics/active-subscribers', 'activeSubscribers', args, warnings, account.tokenEnv),
+    fetchOptionalMetric(baseUrl, '/metrics/refunds', 'refunds', args, warnings, account.tokenEnv),
+    fetchOptionalMetric(baseUrl, '/metrics/chargebacks', 'chargebacks', args, warnings, account.tokenEnv),
+    fetchOptionalMetric(baseUrl, '/metrics/checkout-conversion', 'checkoutConversion', args, warnings, account.tokenEnv),
   ]);
   const metrics = Object.fromEntries(pairs);
-  const summary = buildPaddleSummary({
-    environment: args.environment,
+  return {
+    ...account,
+    environment,
     window: `${args.from}_${args.to}`,
     metrics,
     warnings,
     maxSignals: args.maxSignals,
-  });
+  };
+}
+
+async function main() {
+  await loadOpenClawGrowthSecrets();
+  const args = parseArgs(process.argv.slice(2));
+  const accounts = await resolvePaddleAccounts(args);
+  const accountSummaries = await Promise.all(accounts.map((account) => fetchAccountSummary(args, account)));
+  const summary = accountSummaries.length > 1
+    ? buildPaddleSummary({ accounts: accountSummaries, window: `${args.from}_${args.to}`, maxSignals: args.maxSignals })
+    : buildPaddleSummary(accountSummaries[0]);
   await writeJsonOutput(args.out, summary);
 }
 

@@ -207,7 +207,7 @@ function commandIsBuiltinExporter(command) {
 }
 
 function commandSupportsActiveConfig(command) {
-  return /(?:^|\s)(?:node\s+)?(?:\S*\/)?(?:export-sentry-summary|export-coolify-summary)\.mjs(?:\s|$)/.test(
+  return /(?:^|\s)(?:node\s+)?(?:\S*\/)?(?:export-paddle-summary|export-sentry-summary|export-coolify-summary)\.mjs(?:\s|$)/.test(
     String(command || ''),
   );
 }

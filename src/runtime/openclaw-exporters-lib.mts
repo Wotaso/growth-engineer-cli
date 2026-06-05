@@ -1307,6 +1307,10 @@ function formatMinorCurrency(amount, currencyCode) {
 }
 
 export function buildPaddleSummary(input) {
+  if (Array.isArray(input?.accounts)) {
+    return buildCombinedPaddleSummary(input);
+  }
+
   const revenue = input?.metrics?.revenue || null;
   const mrr = input?.metrics?.monthlyRecurringRevenue || null;
   const activeSubscribers = input?.metrics?.activeSubscribers || null;
@@ -1486,6 +1490,8 @@ export function buildPaddleSummary(input) {
       generatedAt: new Date().toISOString(),
       source: 'paddle',
       environment: input?.environment || 'live',
+      accountId: input?.id || input?.accountId || null,
+      accountLabel: input?.label || null,
       currencyCode: currency || null,
       updatedAt: [
         metricUpdatedAt(revenue),
@@ -1495,6 +1501,70 @@ export function buildPaddleSummary(input) {
         metricUpdatedAt(chargebacks),
         metricUpdatedAt(checkoutConversion),
       ].filter(Boolean)[0] || null,
+      warnings,
+    },
+  };
+}
+
+function buildCombinedPaddleSummary(input) {
+  const accounts = Array.isArray(input?.accounts) ? input.accounts : [];
+  const maxSignals = Math.max(1, Number(input?.maxSignals) || 6);
+  const summaries = accounts
+    .filter((account) => account && typeof account === 'object')
+    .map((account, index) => {
+      const accountId = String(account.id || account.key || account.label || `paddle_${index + 1}`).trim();
+      const label = String(account.label || accountId).trim();
+      const summary = buildPaddleSummary({
+        ...account,
+        accounts: undefined,
+        maxSignals: account.maxSignals || maxSignals,
+      });
+      return { accountId, label, summary };
+    });
+  const signals = summaries
+    .flatMap(({ accountId, label, summary }) =>
+      (Array.isArray(summary.signals) ? summary.signals : []).map((signal) => ({
+        ...signal,
+        id: `${accountId}:${signal.id}`,
+        sourceProject: summary.project,
+        evidence: [`Paddle account: ${label}`, ...(signal.evidence || [])],
+        keywords: [accountId, ...(signal.keywords || [])],
+      })),
+    )
+    .sort((a, b) => {
+      const priorityDelta = priorityRank(b.priority) - priorityRank(a.priority);
+      if (priorityDelta !== 0) return priorityDelta;
+      return (Number(b.current_value) || 0) - (Number(a.current_value) || 0);
+    })
+    .slice(0, maxSignals);
+  const warnings = summaries.flatMap(({ label, summary }) =>
+    (Array.isArray(summary.meta?.warnings) ? summary.meta.warnings : []).map((warning) => `${label}: ${warning}`),
+  );
+
+  return {
+    project: 'paddle:multiple',
+    window: String(input?.window || summaries[0]?.summary?.window || 'last_30d'),
+    metrics: {
+      accounts: summaries.map(({ accountId, label, summary }) => ({
+        id: accountId,
+        label,
+        environment: summary.meta?.environment || null,
+        metrics: summary.metrics || {},
+      })),
+    },
+    signals,
+    meta: {
+      generatedAt: new Date().toISOString(),
+      source: 'paddle',
+      multiAccount: true,
+      accountCount: summaries.length,
+      accounts: summaries.map(({ accountId, label, summary }) => ({
+        id: accountId,
+        label,
+        environment: summary.meta?.environment || null,
+        currencyCode: summary.meta?.currencyCode || null,
+        updatedAt: summary.meta?.updatedAt || null,
+      })),
       warnings,
     },
   };
