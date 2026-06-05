@@ -3770,7 +3770,9 @@ async function guidePaddleConnector(rl, secrets: Record<string, string>) {
   printBullets([
     'Open Paddle > Developer Tools > Authentication.',
     'Use the API keys tab and create a new live API key.',
-    'Grant `metrics.read`. Do not grant write permissions unless another workflow explicitly needs them.',
+    'Minimum: grant `metrics.read` so account-level revenue, MRR, refunds, chargebacks, subscribers, and checkout conversion work.',
+    'Recommended for better Growth Engineer analysis: grant all available read-only permissions (`*.read`), including products, prices, discounts, customers, transactions, subscriptions, adjustments, reports, and notifications.',
+    'Do not grant any write permissions (`*.write`) unless another workflow explicitly needs them.',
     'Do not select or hard-code a single product in the wizard; the Growth Engineer should keep account-level metrics context.',
     'Paste the key here so it is stored only in the local chmod 600 secrets file.',
   ]);
