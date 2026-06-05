@@ -360,6 +360,65 @@ const forwardedArgsAfter = (needle: string): string[] => {
   return index >= 0 ? process.argv.slice(index + 1) : [];
 };
 
+const getForwardedOptionValue = (args: string[], optionName: string): string | null => {
+  const prefix = `${optionName}=`;
+  for (let index = 0; index < args.length; index += 1) {
+    const token = args[index];
+    if (token === optionName) {
+      return args[index + 1] ?? null;
+    }
+    if (token.startsWith(prefix)) {
+      return token.slice(prefix.length);
+    }
+  }
+  return null;
+};
+
+const hasExplicitWizardConfigPath = (args: string[]): boolean =>
+  getForwardedOptionValue(args, '--config') !== null || getForwardedOptionValue(args, '--out') !== null;
+
+const isOpenClawWorkspace = (dir: string): boolean =>
+  existsSync(join(dir, 'skills', 'growth-engineer', '.clawhub', 'origin.json')) ||
+  existsSync(join(dir, 'skills', 'openclaw-growth-engineer', '.clawhub', 'origin.json')) ||
+  existsSync(join(dir, 'scripts', 'openclaw-growth-wizard.mjs'));
+
+const findOpenClawWorkspaceUpwards = (startDir: string): string | null => {
+  let current = resolve(startDir);
+  while (true) {
+    if (isOpenClawWorkspace(current)) {
+      return current;
+    }
+    const parent = dirname(current);
+    if (parent === current) {
+      return null;
+    }
+    current = parent;
+  }
+};
+
+const resolveWizardWorkingDirectory = (args: string[]): string => {
+  if (hasExplicitWizardConfigPath(args)) {
+    return process.cwd();
+  }
+
+  const explicitWorkspace = process.env.OPENCLAW_GROWTH_WORKSPACE?.trim();
+  if (explicitWorkspace && existsSync(resolve(explicitWorkspace))) {
+    return resolve(explicitWorkspace);
+  }
+
+  const currentWorkspace = findOpenClawWorkspaceUpwards(process.cwd());
+  if (currentWorkspace) {
+    return currentWorkspace;
+  }
+
+  const homeWorkspace = process.env.HOME ? join(process.env.HOME, '.openclaw', 'workspace') : '';
+  if (homeWorkspace && isOpenClawWorkspace(homeWorkspace)) {
+    return homeWorkspace;
+  }
+
+  return process.cwd();
+};
+
 const parseGitHubRepoFromRemote = (remoteUrl: string): string | null => {
   const value = remoteUrl.trim();
   if (!value) {
@@ -1317,8 +1376,9 @@ program
   .allowUnknownOption(true)
   .allowExcessArguments(true)
   .action(() => {
-    const result = runRuntimeInteractive('openclaw-growth-wizard', forwardedArgsAfter('wizard'), {
-      cwd: process.cwd(),
+    const forwardedArgs = forwardedArgsAfter('wizard');
+    const result = runRuntimeInteractive('openclaw-growth-wizard', forwardedArgs, {
+      cwd: resolveWizardWorkingDirectory(forwardedArgs),
     });
     if (!result.ok) {
       process.exitCode = result.code ?? 1;
