@@ -1469,7 +1469,7 @@ export function buildPaddleSummary(input) {
       current_value: warnings.length,
       evidence: warnings.slice(0, 8),
       suggested_actions: [
-        'Verify the Paddle API key has metrics.read permission on the live account',
+        'Verify the Paddle API key is valid for the live account metrics endpoints',
         'Keep sandbox and live keys separate; Paddle metrics endpoints are intended for live account reporting',
       ],
       keywords: ['paddle', 'api', 'metrics', 'permissions'],

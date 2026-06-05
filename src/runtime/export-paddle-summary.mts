@@ -26,7 +26,7 @@ Options:
   --help, -h                   Show help
 
 Environment:
-  PADDLE_API_KEY               Paddle API key with metrics.read permission
+  PADDLE_API_KEY               Paddle API key for the account metrics endpoints
 `);
   process.exit(exitCode);
 }
@@ -116,7 +116,7 @@ function buildUrl(baseUrl, pathname, args) {
 async function fetchPaddleMetric(baseUrl, pathname, args) {
   const token = String(process.env.PADDLE_API_KEY || '').trim();
   if (!token) {
-    throw new Error('Missing PADDLE_API_KEY. Rerun the connector wizard and paste a Paddle API key with metrics.read permission.');
+    throw new Error('Missing PADDLE_API_KEY. Rerun the connector wizard and paste a Paddle API key from Developer Tools > Authentication.');
   }
 
   const response = await fetch(buildUrl(baseUrl, pathname, args), {
