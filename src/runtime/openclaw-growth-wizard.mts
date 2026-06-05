@@ -133,7 +133,7 @@ const CONNECTOR_DEFINITIONS: ConnectorDefinition[] = [
     key: 'paddle',
     label: 'Paddle Billing metrics',
     summary: 'Read web checkout, revenue, MRR, refunds, chargebacks, and active subscriber metrics.',
-    needs: 'A Paddle API key for the live account. Paddle may not expose per-key scope selection in every vendor UI.',
+    needs: 'A scoped Paddle API key for the live account with metrics.read permission.',
   },
   {
     key: 'seo',
@@ -2225,7 +2225,7 @@ function summarizeFailureFix(connector, blockers) {
     return 'Paste a RevenueCat v2 secret API key with read-only project permissions, then rerun setup.';
   }
   if (connector === 'paddle') {
-    return 'Paste a live Paddle API key from Developer Tools > Authentication, then rerun setup. Paddle may not expose per-key scope selection in every vendor UI.';
+    return 'Paste a live Paddle API key from Developer Tools > Authentication v2 with metrics.read permission, then rerun setup.';
   }
   if (connector === 'seo') {
     return 'Configure Search Console read access. Leave GSC_SITE_URL empty to scan all verified properties in the account, or set it only when you intentionally want one property.';
@@ -3677,12 +3677,11 @@ async function guidePaddleConnector(rl, secrets: Record<string, string>) {
   printSection('Paddle Billing metrics', [
     'Use this when OpenClaw should read web checkout, revenue, MRR, refunds, chargebacks, and active subscriber metrics.',
   ]);
-  process.stdout.write('\nCreate or update a Paddle API key here:\n  https://vendors.paddle.com/authentication\n\n');
+  process.stdout.write('\nCreate or update a scoped Paddle API key here:\n  https://vendors.paddle.com/authentication-v2\n\n');
   printBullets([
     'Open Paddle > Developer Tools > Authentication.',
-    'Create a new API key for the live account when you want production revenue evidence.',
-    'If your Paddle UI offers API-key permissions, grant only the permissions needed for metrics/revenue reads.',
-    'If your Paddle UI does not offer scope selection, use a dedicated Growth Engineer key and rotate/revoke it from Paddle when needed.',
+    'Use the API keys tab and create a new live API key.',
+    'Grant `metrics.read`. Do not grant write permissions unless another workflow explicitly needs them.',
     'Do not select or hard-code a single product in the wizard; the Growth Engineer should keep account-level metrics context.',
     'Paste the key here so it is stored only in the local chmod 600 secrets file.',
   ]);

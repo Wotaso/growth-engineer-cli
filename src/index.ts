@@ -1007,7 +1007,7 @@ const installConnectorHelpers = async (
         connector: 'paddle',
         ok: true,
         detail:
-          'Paddle is configured through the npx wizard connector flow; create a dedicated live Paddle API key from Developer Tools > Authentication, then run `npx -y @analyticscli/growth-engineer@preview wizard --connectors paddle` to store PADDLE_API_KEY locally',
+          'Paddle is configured through the npx wizard connector flow; create a live Paddle API key with metrics.read at https://vendors.paddle.com/authentication-v2, then run `npx -y @analyticscli/growth-engineer@preview wizard --connectors paddle` to store PADDLE_API_KEY locally',
       };
     }
     if (connector === 'seo') {
