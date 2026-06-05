@@ -1,0 +1,67 @@
+name: Publish Growth Engineer to npm
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'package.json'
+      - 'src/**'
+      - 'templates/**'
+      - 'tsconfig.json'
+      - '.github/workflows/publish-npm.yml'
+  workflow_dispatch:
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+
+      - name: Resolve package metadata
+        id: meta
+        run: |
+          version="$(node -p "require('./package.json').version")"
+          if [[ "${version}" == *-* ]]; then
+            tag="preview"
+          else
+            tag="latest"
+          fi
+          echo "version=${version}" >> "${GITHUB_OUTPUT}"
+          echo "tag=${tag}" >> "${GITHUB_OUTPUT}"
+
+      - name: Skip existing version
+        id: existing
+        run: |
+          version="${{ steps.meta.outputs.version }}"
+          if npm view "@analyticscli/growth-engineer@${version}" version >/dev/null 2>&1; then
+            echo "published=true" >> "${GITHUB_OUTPUT}"
+          else
+            echo "published=false" >> "${GITHUB_OUTPUT}"
+          fi
+
+      - name: Install dependencies
+        if: steps.existing.outputs.published != 'true'
+        run: npm install
+
+      - name: Validate package
+        if: steps.existing.outputs.published != 'true'
+        run: npm run typecheck && npm run build
+
+      - name: Publish
+        if: steps.existing.outputs.published != 'true'
+        run: npm publish --access public --tag "${{ steps.meta.outputs.tag }}" --provenance
+
+      - name: Verify
+        run: npm view "@analyticscli/growth-engineer@${{ steps.meta.outputs.version }}" version dist-tags --json

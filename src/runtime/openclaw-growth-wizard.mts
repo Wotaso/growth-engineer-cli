@@ -4072,7 +4072,7 @@ async function maybeSelfUpdateFromClawHub(args) {
   if (!installedSkill) return false;
   if (!(await commandExists('npx'))) return false;
 
-  const force = String(process.env.OPENCLAW_GROWTH_SELF_UPDATE || '').trim().toLowerCase() === 'always';
+  const force = args.connectorWizard || String(process.env.OPENCLAW_GROWTH_SELF_UPDATE || '').trim().toLowerCase() === 'always';
   if (!(await shouldRunSelfUpdate(workspaceRoot, force))) return false;
 
   const beforeOrigin = await readJsonIfPresent(installedSkill.originPath).catch(() => null);

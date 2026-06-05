@@ -202,6 +202,7 @@ function resolveRuntimeScriptPath(scriptName) {
   const candidates = [
     path.join(RUNTIME_DIR, scriptName),
     path.join(process.cwd(), 'scripts', scriptName),
+    path.join(process.cwd(), 'skills', 'growth-engineer', 'scripts', scriptName),
     path.join(process.cwd(), 'skills', 'openclaw-growth-engineer', 'scripts', scriptName),
   ];
   for (const candidate of candidates) {

@@ -271,6 +271,7 @@ function resolveRuntimeScriptPath(scriptName) {
   const candidates = [
     path.join(RUNTIME_DIR, scriptName),
     path.resolve('scripts', scriptName),
+    path.resolve('skills/growth-engineer/scripts', scriptName),
     path.resolve('skills/openclaw-growth-engineer/scripts', scriptName),
   ];
   return candidates.find((candidate) => existsSync(candidate)) || path.join(RUNTIME_DIR, scriptName);
