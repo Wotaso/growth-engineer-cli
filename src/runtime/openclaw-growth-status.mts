@@ -232,6 +232,67 @@ function isConfiguredRepo(value) {
   return Boolean(repo && repo !== 'owner/repo' && /^[^/\s]+\/[^/\s]+$/.test(repo));
 }
 
+function normalizeString(value) {
+  return String(value || '').trim();
+}
+
+function parseJsonFromStdout(stdout) {
+  const text = String(stdout || '').trim();
+  if (!text) return null;
+  try {
+    return JSON.parse(text);
+  } catch {
+    const first = text.indexOf('{');
+    const last = text.lastIndexOf('}');
+    if (first >= 0 && last > first) {
+      try {
+        return JSON.parse(text.slice(first, last + 1));
+      } catch {
+        return null;
+      }
+    }
+    return null;
+  }
+}
+
+function extractAscAppIds(payload) {
+  const candidates = (() => {
+    if (Array.isArray(payload)) return payload;
+    if (payload && typeof payload === 'object') {
+      if (Array.isArray(payload.apps)) return payload.apps;
+      if (Array.isArray(payload.items)) return payload.items;
+      if (Array.isArray(payload.data)) return payload.data;
+    }
+    return [];
+  })();
+  const ids = [];
+  for (const candidate of candidates) {
+    const attrs = candidate?.attributes && typeof candidate.attributes === 'object' ? candidate.attributes : {};
+    const id = normalizeString(candidate?.id) || normalizeString(candidate?.appId) || normalizeString(candidate?.app_id) || normalizeString(attrs.id);
+    if (id) ids.push(id);
+  }
+  return [...new Set(ids)];
+}
+
+function extractAscAnalyticsRequestIds(payload) {
+  const candidates = (() => {
+    if (Array.isArray(payload)) return payload;
+    if (payload && typeof payload === 'object') {
+      if (Array.isArray(payload.requests)) return payload.requests;
+      if (Array.isArray(payload.analyticsReportRequests)) return payload.analyticsReportRequests;
+      if (Array.isArray(payload.items)) return payload.items;
+      if (Array.isArray(payload.data)) return payload.data;
+    }
+    return [];
+  })();
+  const ids = [];
+  for (const candidate of candidates) {
+    const id = normalizeString(candidate?.id) || normalizeString(candidate?.requestId) || normalizeString(candidate?.request_id);
+    if (id) ids.push(id);
+  }
+  return [...new Set(ids)];
+}
+
 async function runPreflight(configPath, timeoutMs, progressJson = false, onlyConnectors: string[] = []) {
   const command = [
     nodeRuntimeScriptCommand('openclaw-growth-preflight.mjs'),
@@ -318,6 +379,105 @@ async function checkGitHub(config, timeoutMs) {
   return connector('not_connected', hasRepo ? 'No GITHUB_TOKEN or gh auth found' : 'project.githubRepo is not configured', {
     nextAction: `Run: ${WIZARD_COMMAND} --connectors github.`,
   });
+}
+
+async function checkAscAnalyticsReadiness(timeoutMs) {
+  const vendorNumber = normalizeString(process.env.ASC_VENDOR_NUMBER || process.env.ASC_ANALYTICS_VENDOR_NUMBER);
+  const appList = await runShell('asc apps list --output json', { timeoutMs: Math.max(5_000, timeoutMs) });
+  if (!appList.ok) {
+    return {
+      status: 'blocked',
+      detail: `ASC App Analytics readiness could not list apps: ${normalizeString(appList.stderr) || `exit ${appList.code}`}`,
+      vendorNumber,
+      appCount: 0,
+      checkedAppCount: 0,
+      requestCount: 0,
+    };
+  }
+
+  const appIds = extractAscAppIds(parseJsonFromStdout(appList.stdout));
+  if (appIds.length === 0) {
+    return {
+      status: 'blocked',
+      detail: 'ASC App Analytics readiness found no accessible apps; App Analytics reports cannot be verified',
+      vendorNumber,
+      appCount: 0,
+      checkedAppCount: 0,
+      requestCount: 0,
+    };
+  }
+
+  const checkedAppIds = appIds.slice(0, 12);
+  const results: any[] = [];
+  for (const appId of checkedAppIds) {
+    const result = await runShell(`asc analytics requests --app ${quote(appId)} --output json`, {
+      timeoutMs: Math.max(5_000, timeoutMs),
+    });
+    const ids = result.ok ? extractAscAnalyticsRequestIds(parseJsonFromStdout(result.stdout)) : [];
+    results.push({
+      appId,
+      ok: result.ok,
+      requestCount: ids.length,
+      error: result.ok ? null : normalizeString(result.stderr) || `exit ${result.code}`,
+    });
+  }
+
+  const failed = results.filter((result) => !result.ok);
+  const appsWithRequests = results.filter((result) => result.requestCount > 0);
+  const requestCount = results.reduce((sum, result) => sum + Number(result.requestCount || 0), 0);
+  if (failed.length > 0) {
+    return {
+      status: 'blocked',
+      detail: `ASC App Analytics report requests could not be queried for ${failed.length}/${results.length} checked app(s): ${failed[0].error}`,
+      vendorNumber,
+      appCount: appIds.length,
+      checkedAppCount: results.length,
+      requestCount,
+      results,
+    };
+  }
+  if (appsWithRequests.length === 0) {
+    return {
+      status: 'blocked',
+      detail: `ASC App Analytics has no report requests for ${results.length} checked app(s); run setup with an Admin key so Growth Engineer can create ongoing Analytics Report Requests`,
+      vendorNumber,
+      appCount: appIds.length,
+      checkedAppCount: results.length,
+      requestCount: 0,
+      results,
+    };
+  }
+  if (!vendorNumber) {
+    return {
+      status: 'partial',
+      detail: `ASC App Analytics report requests exist for ${appsWithRequests.length}/${results.length} checked app(s), but ASC_VENDOR_NUMBER is missing for Sales and Trends/App Units`,
+      vendorNumber,
+      appCount: appIds.length,
+      checkedAppCount: results.length,
+      requestCount,
+      results,
+    };
+  }
+  if (appsWithRequests.length < results.length) {
+    return {
+      status: 'partial',
+      detail: `ASC App Analytics report requests exist for ${appsWithRequests.length}/${results.length} checked app(s); missing requests must be created for full account coverage`,
+      vendorNumber,
+      appCount: appIds.length,
+      checkedAppCount: results.length,
+      requestCount,
+      results,
+    };
+  }
+  return {
+    status: 'connected',
+    detail: `ASC API auth, App Analytics report requests, and ASC_VENDOR_NUMBER are available for ${results.length} checked app(s)`,
+    vendorNumber,
+    appCount: appIds.length,
+    checkedAppCount: results.length,
+    requestCount,
+    results,
+  };
 }
 
 function summarizeAnalytics(preflight, config) {
@@ -422,8 +582,23 @@ async function summarizeAsc(preflight, config, timeoutMs) {
     return connector('not_enabled', 'App Store Connect CLI source is disabled');
   }
   if (ascConnection?.status === 'pass') {
-    return connector('connected', 'ASC API-key exporter smoke test passed for accessible apps', {
+    const analyticsReadiness = await checkAscAnalyticsReadiness(timeoutMs);
+    if (analyticsReadiness.status !== 'connected') {
+      return connector(analyticsReadiness.status, analyticsReadiness.detail, {
+        appScope: 'all_accessible_apps',
+        appAnalyticsReports: 'required',
+        vendorNumber: analyticsReadiness.vendorNumber ? 'set' : 'missing',
+        checkedAppCount: analyticsReadiness.checkedAppCount,
+        requestCount: analyticsReadiness.requestCount,
+        nextAction: `Run: ${WIZARD_COMMAND} --connectors asc.`,
+      });
+    }
+    return connector('connected', analyticsReadiness.detail, {
       appScope: 'all_accessible_apps',
+      appAnalyticsReports: 'available',
+      vendorNumber: 'set',
+      checkedAppCount: analyticsReadiness.checkedAppCount,
+      requestCount: analyticsReadiness.requestCount,
       webAnalytics: 'optional_fallback_only',
     });
   }
