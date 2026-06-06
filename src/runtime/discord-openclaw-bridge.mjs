@@ -140,12 +140,20 @@ function printMessages(messages) {
   }
 }
 
-function chunkMessage(content) {
-  const chunks = [];
-  const maxLength = 1900;
-  let remaining = content.trim();
+function truncateDiscordText(value, maxLength) {
+  const text = String(value || "").trim();
+  if (text.length <= maxLength) {
+    return text;
+  }
+  return `${text.slice(0, Math.max(0, maxLength - 3)).trim()}...`;
+}
 
-  while (remaining.length > maxLength) {
+function chunkEmbedDescription(content) {
+  const chunks = [];
+  const maxLength = 4000;
+  let remaining = String(content || "").trim();
+
+  while (remaining.length > maxLength && chunks.length < 9) {
     let splitAt = remaining.lastIndexOf("\n", maxLength);
     if (splitAt < maxLength * 0.5) {
       splitAt = remaining.lastIndexOf(" ", maxLength);
@@ -158,27 +166,69 @@ function chunkMessage(content) {
   }
 
   if (remaining) {
-    chunks.push(remaining);
+    chunks.push(truncateDiscordText(remaining, maxLength));
   }
-  return chunks;
+  return chunks.slice(0, 10);
+}
+
+function plainTextToEmbedPayload(input) {
+  const text = String(input || "").trim();
+  if (!text) {
+    return null;
+  }
+
+  const lines = text.split(/\r?\n/);
+  const firstLineIndex = Math.max(0, lines.findIndex((line) => line.trim()));
+  const firstLine = lines[firstLineIndex]?.trim() || "OpenClaw update";
+  const title = truncateDiscordText(firstLine, 256);
+  const body = lines.slice(firstLineIndex + 1).join("\n").trim();
+  const descriptionChunks = chunkEmbedDescription(body || (firstLine.length > 256 ? firstLine : ""));
+  const embeds = [];
+
+  if (descriptionChunks.length === 0) {
+    embeds.push({
+      title,
+      color: 0x2f81f7,
+      timestamp: new Date().toISOString(),
+    });
+  } else {
+    for (const [index, description] of descriptionChunks.entries()) {
+      embeds.push({
+        ...(index === 0 ? { title } : {}),
+        description,
+        color: 0x2f81f7,
+        timestamp: new Date().toISOString(),
+      });
+    }
+  }
+
+  return {
+    content: "",
+    embeds,
+    fallbackText: text,
+  };
 }
 
 function normalizeEmbedPayload(input) {
-  if (process.env.OPENCLAW_DISCORD_DELIVERY_FORMAT !== "embed" && !process.argv.includes("--json")) {
-    return null;
+  const raw = String(input || "");
+  if (process.env.OPENCLAW_DISCORD_DELIVERY_FORMAT === "embed" || process.argv.includes("--json") || raw.trim().startsWith("{")) {
+    try {
+      const payload = JSON.parse(raw);
+      const embeds = Array.isArray(payload.embeds) ? payload.embeds : [];
+      if (embeds.length > 0) {
+        return {
+          content: String(payload.content || "").slice(0, 2000),
+          embeds: embeds.slice(0, 10),
+          fallbackText: String(payload.fallbackText || payload.fallback_text || "").trim(),
+        };
+      }
+    } catch {
+      if (process.argv.includes("--json")) {
+        return null;
+      }
+    }
   }
-  try {
-    const payload = JSON.parse(String(input || ""));
-    const embeds = Array.isArray(payload.embeds) ? payload.embeds : [];
-    if (embeds.length === 0) return null;
-    return {
-      content: String(payload.content || "").slice(0, 2000),
-      embeds: embeds.slice(0, 10),
-      fallbackText: String(payload.fallbackText || payload.fallback_text || "").trim(),
-    };
-  } catch {
-    return null;
-  }
+  return plainTextToEmbedPayload(raw);
 }
 
 async function sendDiscordPayload(payload) {
@@ -204,26 +254,7 @@ async function sendMessage(content) {
     return await sendDiscordPayload(embedPayload);
   }
 
-  const chunks = chunkMessage(content);
-  if (chunks.length === 0) {
-    throw new Error("Refusing to send an empty message.");
-  }
-
-  const sent = [];
-  for (const target of DISCORD_TARGETS) {
-    await validateTargetChannel(target);
-    for (const chunk of chunks) {
-      const message = await discordFetch(`/channels/${target.channelId}/messages`, {
-        method: "POST",
-        body: JSON.stringify({
-          allowed_mentions: { parse: [], users: target.allowedMentionUsers },
-          content: chunk,
-        }),
-      });
-      sent.push({ target, message });
-    }
-  }
-  return sent;
+  throw new Error("Refusing to send an empty message.");
 }
 
 async function readStdin() {
