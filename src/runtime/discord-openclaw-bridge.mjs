@@ -148,12 +148,12 @@ function truncateDiscordText(value, maxLength) {
   return `${text.slice(0, Math.max(0, maxLength - 3)).trim()}...`;
 }
 
-function chunkEmbedDescription(content) {
+function chunkMessage(content) {
   const chunks = [];
-  const maxLength = 4000;
+  const maxLength = 1900;
   let remaining = String(content || "").trim();
 
-  while (remaining.length > maxLength && chunks.length < 9) {
+  while (remaining.length > maxLength) {
     let splitAt = remaining.lastIndexOf("\n", maxLength);
     if (splitAt < maxLength * 0.5) {
       splitAt = remaining.lastIndexOf(" ", maxLength);
@@ -166,47 +166,177 @@ function chunkEmbedDescription(content) {
   }
 
   if (remaining) {
-    chunks.push(truncateDiscordText(remaining, maxLength));
+    chunks.push(remaining);
   }
-  return chunks.slice(0, 10);
+  return chunks;
 }
 
-function plainTextToEmbedPayload(input) {
+function discordField(name, value, inline = false) {
+  return {
+    name: truncateDiscordText(name, 256) || "Detail",
+    value: truncateDiscordText(value, 1024) || "-",
+    inline,
+  };
+}
+
+function splitNamedLine(line) {
+  const clean = String(line || "").replace(/^-\s*/, "").trim();
+  const bracketMarker = clean.indexOf(": [");
+  if (bracketMarker > 0) {
+    return [clean.slice(0, bracketMarker).trim(), clean.slice(bracketMarker + 2).trim()];
+  }
+  const splitAt = clean.lastIndexOf(": ");
+  if (splitAt > 0) {
+    return [clean.slice(0, splitAt).trim(), clean.slice(splitAt + 2).trim()];
+  }
+  return null;
+}
+
+function buildStructuredOpenClawDailyPayload(text, lines) {
+  const title = truncateDiscordText(lines[0], 256);
+  const fields = [];
+  let inTopByProject = false;
+  let pendingFinding = null;
+  const flushPendingFinding = () => {
+    if (pendingFinding) {
+      fields.push(discordField(pendingFinding.name, pendingFinding.value));
+      pendingFinding = null;
+    }
+  };
+
+  for (const line of lines.slice(1)) {
+    if (/^Top by project:/i.test(line)) {
+      inTopByProject = true;
+      continue;
+    }
+    if (/^Action:/i.test(line)) {
+      flushPendingFinding();
+      fields.push(discordField("Action", line.replace(/^Action:\s*/i, ""), true));
+      continue;
+    }
+    if (/^Suppressed today:/i.test(line)) {
+      flushPendingFinding();
+      fields.push(discordField("Suppressed today", line.replace(/^Suppressed today:\s*/i, ""), true));
+      continue;
+    }
+    if (/^Charts:/i.test(line)) {
+      flushPendingFinding();
+      fields.push(discordField("Charts", line.replace(/^Charts:\s*/i, ""), true));
+      continue;
+    }
+    if (/^Runner completed/i.test(line)) {
+      flushPendingFinding();
+      fields.push(discordField("Run status", line));
+      continue;
+    }
+    if (/^Link:/i.test(line)) {
+      if (pendingFinding) {
+        pendingFinding.value = `${pendingFinding.value}\n${line}`;
+      } else {
+        fields.push(discordField("Link", line.replace(/^Link:\s*/i, "")));
+      }
+      continue;
+    }
+    if (/^\d+\s+events?,/i.test(line) && pendingFinding) {
+      pendingFinding.value = `${pendingFinding.value}\n${line}`;
+      continue;
+    }
+    if (inTopByProject && /^-\s*/.test(line)) {
+      flushPendingFinding();
+      const named = splitNamedLine(line);
+      if (named) {
+        fields.push(discordField(named[0], named[1]));
+      }
+      continue;
+    }
+    const named = splitNamedLine(line);
+    if (named && /^(sentry|glitchtip|analytics|github|asc|appStoreConnect|revenue|coolify|stripe|paddle)/i.test(named[0])) {
+      flushPendingFinding();
+      pendingFinding = { name: named[0], value: named[1] };
+      continue;
+    }
+    if (line.trim()) {
+      flushPendingFinding();
+      fields.push(discordField("Detail", line));
+    }
+  }
+  flushPendingFinding();
+
+  return {
+    content: "",
+    embeds: [
+      {
+        title,
+        color: /^OpenClaw (daily|healthcheck): OK/i.test(title) ? 0x12b76a : 0xf79009,
+        fields: fields.slice(0, 20),
+        footer: { text: "GROWTH_RUN" },
+        timestamp: new Date().toISOString(),
+      },
+    ],
+    fallbackText: text,
+  };
+}
+
+function buildStructuredConnectorPayload(text, lines) {
+  const title = truncateDiscordText(lines[0], 256);
+  const fields = [];
+  let description = "";
+  for (const line of lines.slice(1)) {
+    if (/^Secrets stay/i.test(line)) {
+      description = line;
+      continue;
+    }
+    if (/^Fix:/i.test(line)) {
+      fields.push(discordField("Fix", line.replace(/^Fix:\s*/i, "")));
+      continue;
+    }
+    if (/^At\s+\d{4}-/i.test(line)) {
+      fields.push(discordField("Proof", line));
+      continue;
+    }
+    if (/CONNECTOR_HEALTH_ALERT/i.test(line)) {
+      continue;
+    }
+    const named = splitNamedLine(line);
+    if (named) {
+      fields.push(discordField(named[0], named[1]));
+    } else if (line.trim()) {
+      fields.push(discordField("Detail", line));
+    }
+  }
+  return {
+    content: "",
+    embeds: [
+      {
+        title,
+        description,
+        color: /blocked|failed|issue/i.test(text) ? 0xd92d20 : 0xf79009,
+        fields: fields.slice(0, 20),
+        footer: { text: "CONNECTOR_HEALTH_ALERT" },
+        timestamp: new Date().toISOString(),
+      },
+    ],
+    fallbackText: text,
+  };
+}
+
+function structuredTextToEmbedPayload(input) {
   const text = String(input || "").trim();
   if (!text) {
     return null;
   }
 
-  const lines = text.split(/\r?\n/);
-  const firstLineIndex = Math.max(0, lines.findIndex((line) => line.trim()));
-  const firstLine = lines[firstLineIndex]?.trim() || "OpenClaw update";
-  const title = truncateDiscordText(firstLine, 256);
-  const body = lines.slice(firstLineIndex + 1).join("\n").trim();
-  const descriptionChunks = chunkEmbedDescription(body || (firstLine.length > 256 ? firstLine : ""));
-  const embeds = [];
-
-  if (descriptionChunks.length === 0) {
-    embeds.push({
-      title,
-      color: 0x2f81f7,
-      timestamp: new Date().toISOString(),
-    });
-  } else {
-    for (const [index, description] of descriptionChunks.entries()) {
-      embeds.push({
-        ...(index === 0 ? { title } : {}),
-        description,
-        color: 0x2f81f7,
-        timestamp: new Date().toISOString(),
-      });
-    }
+  const lines = text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  if (lines.length === 0) {
+    return null;
   }
-
-  return {
-    content: "",
-    embeds,
-    fallbackText: text,
-  };
+  if (/^OpenClaw connector health:/i.test(lines[0]) || /CONNECTOR_HEALTH_ALERT/.test(text)) {
+    return buildStructuredConnectorPayload(text, lines);
+  }
+  if (/^OpenClaw (daily|healthcheck)(:|\s)/i.test(lines[0])) {
+    return buildStructuredOpenClawDailyPayload(text, lines);
+  }
+  return null;
 }
 
 function normalizeEmbedPayload(input) {
@@ -228,7 +358,7 @@ function normalizeEmbedPayload(input) {
       }
     }
   }
-  return plainTextToEmbedPayload(raw);
+  return structuredTextToEmbedPayload(raw);
 }
 
 async function sendDiscordPayload(payload) {
@@ -254,7 +384,26 @@ async function sendMessage(content) {
     return await sendDiscordPayload(embedPayload);
   }
 
-  throw new Error("Refusing to send an empty message.");
+  const chunks = chunkMessage(content);
+  if (chunks.length === 0) {
+    throw new Error("Refusing to send an empty message.");
+  }
+
+  const sent = [];
+  for (const target of DISCORD_TARGETS) {
+    await validateTargetChannel(target);
+    for (const chunk of chunks) {
+      const message = await discordFetch(`/channels/${target.channelId}/messages`, {
+        method: "POST",
+        body: JSON.stringify({
+          allowed_mentions: { parse: [], users: target.allowedMentionUsers },
+          content: chunk,
+        }),
+      });
+      sent.push({ target, message });
+    }
+  }
+  return sent;
 }
 
 async function readStdin() {
