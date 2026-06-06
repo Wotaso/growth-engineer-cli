@@ -1766,13 +1766,100 @@ async function connectorKeysForHealthCheck(configPath): Promise<ConnectorKey[]> 
   return orderConnectors([...configured]);
 }
 
+function connectorKeyFromRunnerHealthKey(key): ConnectorKey | null {
+  const normalized = String(key || '').trim();
+  if (normalized === 'analyticscli') return 'analytics';
+  if (normalized === 'appStoreConnect') return 'asc';
+  const connector = normalizeConnectorProgressKey(normalized);
+  return connector || null;
+}
+
+function activeIncidentStatusLabel(status) {
+  const normalized = String(status || '').trim();
+  return normalized || 'blocked';
+}
+
+async function readActiveConnectorIncidents(configPath): Promise<Record<string, any>> {
+  const statePath = deriveStatePathFromConfigPath(configPath);
+  const state = await readJsonIfPresent(statePath).catch(() => null);
+  const healthState = state?.connectorHealth;
+  if (
+    !healthState ||
+    healthState.lastStatusOk !== false ||
+    !healthState.activeIncidentFingerprint
+  ) {
+    return {};
+  }
+
+  const alertJsonPath = healthState.lastAlertJsonPath
+    ? path.resolve(String(healthState.lastAlertJsonPath))
+    : path.resolve(path.dirname(statePath), 'runtime/connector-health/latest.json');
+  const alertJson = await readJsonIfPresent(alertJsonPath).catch(() => null);
+  const unhealthyConnectors = Array.isArray(alertJson?.unhealthyConnectors)
+    ? alertJson.unhealthyConnectors
+    : [];
+  const incidents: Record<string, any> = {};
+  for (const entry of unhealthyConnectors) {
+    const key = connectorKeyFromRunnerHealthKey(entry?.key);
+    if (!key) continue;
+    incidents[key] = {
+      ...entry,
+      status: activeIncidentStatusLabel(entry?.status),
+      detail: String(entry?.detail || 'Runner still has an active connector-health incident').trim(),
+      activeRunnerIncident: true,
+      activeIncidentFingerprint: healthState.activeIncidentFingerprint,
+      lastCheckedAt: healthState.lastCheckedAt || null,
+    };
+  }
+  return incidents;
+}
+
+function mergeActiveConnectorIncidents(
+  healthByConnector: Record<string, any>,
+  activeIncidents: Record<string, any>,
+) {
+  if (!activeIncidents || Object.keys(activeIncidents).length === 0) {
+    return healthByConnector;
+  }
+  return Object.fromEntries(
+    CONNECTOR_KEYS.map((key) => {
+      const liveHealth = getConnectorHealth(key, healthByConnector);
+      const incident = activeIncidents[key];
+      if (!incident) return [key, liveHealth];
+      if (liveHealth.status === 'connected') {
+        return [
+          key,
+          {
+            ...liveHealth,
+            status: 'partial',
+            detail: `Live wizard check passed, but the runner still has an active ${incident.status} incident; run the connector health job once to record recovery.`,
+            activeRunnerIncident: true,
+            activeIncidentFingerprint: incident.activeIncidentFingerprint,
+            lastCheckedAt: incident.lastCheckedAt,
+          },
+        ];
+      }
+      return [
+        key,
+        {
+          ...liveHealth,
+          ...incident,
+          status: incident.status || liveHealth.status || 'blocked',
+          detail: incident.detail || liveHealth.detail,
+        },
+      ];
+    }),
+  );
+}
+
 async function getConnectorPickerHealth(
   configPath,
   onProgress: (event: any) => void = () => {},
   onlyConnectors: ConnectorKey[] = [],
 ) {
+  const activeIncidents = await readActiveConnectorIncidents(configPath);
   if (!(await fileExists(configPath))) {
-    return Object.fromEntries(
+    const fallbackHealth = Object.fromEntries(
       CONNECTOR_KEYS.map((key) => [
         key,
         {
@@ -1783,9 +1870,11 @@ async function getConnectorPickerHealth(
         },
       ]),
     );
+    return mergeActiveConnectorIncidents(fallbackHealth, activeIncidents);
   }
   if (onlyConnectors.length === 0) {
-    return Object.fromEntries(CONNECTOR_KEYS.map((key) => [key, getConnectorHealth(key, {})]));
+    const fallbackHealth = Object.fromEntries(CONNECTOR_KEYS.map((key) => [key, getConnectorHealth(key, {})]));
+    return mergeActiveConnectorIncidents(fallbackHealth, activeIncidents);
   }
   const onlyArg = ` --only-connectors ${quote(orderConnectors(onlyConnectors).join(','))}`;
   const result = await runCommandCaptureWithProgress(
@@ -1804,9 +1893,10 @@ async function getConnectorPickerHealth(
     coolify: connectors.coolify,
     asc: connectors.appStoreConnect,
   };
-  return Object.fromEntries(
+  const liveHealth = Object.fromEntries(
     CONNECTOR_KEYS.map((key) => [key, getConnectorHealth(key, healthByConnector)]),
   );
+  return mergeActiveConnectorIncidents(liveHealth, activeIncidents);
 }
 
 function renderConnectorPicker(
