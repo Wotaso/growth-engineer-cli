@@ -382,7 +382,7 @@ async function checkGitHub(config, timeoutMs) {
 }
 
 async function checkAscAnalyticsReadiness(timeoutMs) {
-  const vendorNumber = normalizeString(process.env.ASC_VENDOR_NUMBER || process.env.ASC_ANALYTICS_VENDOR_NUMBER);
+  const vendorNumber = normalizeString(process.env.ASC_VENDOR_NUMBER);
   const appList = await runShell('asc apps list --output json', { timeoutMs: Math.max(5_000, timeoutMs) });
   if (!appList.ok) {
     return {

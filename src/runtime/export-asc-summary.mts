@@ -347,7 +347,7 @@ async function downloadBatchAnalyticsReports(appId, args, warnings) {
   const reports = [];
   const appCacheDir = path.resolve(args.cacheDir || path.join(os.tmpdir(), 'openclaw-asc-cache'), appId, args.end);
 
-  const vendor = String(process.env.ASC_VENDOR_NUMBER || process.env.ASC_ANALYTICS_VENDOR_NUMBER || '').trim();
+  const vendor = String(process.env.ASC_VENDOR_NUMBER || '').trim();
   if (vendor) {
     const sales = await downloadAndParseReport(
       'ASC daily sales batch report',

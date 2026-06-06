@@ -4259,7 +4259,7 @@ async function guideAscConnector(rl, secrets: Record<string, string>) {
   const vendorNumber = await ask(
     rl,
     'ASC_VENDOR_NUMBER for Sales and Trends/App Units (required for healthy ASC status)',
-    process.env.ASC_VENDOR_NUMBER || process.env.ASC_ANALYTICS_VENDOR_NUMBER || '',
+    process.env.ASC_VENDOR_NUMBER || '',
   );
   if (vendorNumber.trim()) secrets.ASC_VENDOR_NUMBER = vendorNumber.trim();
 }
