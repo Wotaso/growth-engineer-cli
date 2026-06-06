@@ -533,7 +533,7 @@ function isSudoPasswordPrompt(stderr) {
   return /sudo: (?:a password is required|a terminal is required to read the password|no tty present)/i.test(String(stderr || ''));
 }
 
-function runShellCommand(command, timeoutMs = 120_000, options: { cwd?: string; input?: string } = {}): Promise<ShellResult> {
+function runShellCommand(command, timeoutMs = 120_000, options: { cwd?: string; input?: string; env?: Record<string, string> } = {}): Promise<ShellResult> {
   return new Promise((resolve) => {
     const hardenedCommand = hardenUnattendedShellCommand(command);
     const child = spawn(resolveShellCommand(), ['-c', hardenedCommand], {
@@ -541,6 +541,7 @@ function runShellCommand(command, timeoutMs = 120_000, options: { cwd?: string; 
       cwd: options.cwd,
       env: {
         ...process.env,
+        ...(options.env || {}),
         DEBIAN_FRONTEND: 'noninteractive',
         SUDO_ASKPASS: '/bin/false',
         SUDO_PROMPT: '',
@@ -990,6 +991,7 @@ function notificationChannelKey(channel) {
   if (type === 'openclaw-chat') return 'openclaw-chat';
   if (type === 'slack') return `slack:${channel?.label || channel?.webhookEnv || 'slack'}`;
   if (type === 'webhook') return `webhook:${channel?.label || channel?.urlEnv || channel?.webhookEnv || 'webhook'}`;
+  if (type === 'discord') return `discord:${channel?.label || channel?.command || 'discord'}`;
   if (type === 'command') return `command:${channel?.label || channel?.command || 'command'}`;
   return `${type}:${channel?.label || type}`;
 }
@@ -1047,7 +1049,7 @@ function getDeliveryNotificationChannels(config, kind) {
   }
   if (deliveries.discord?.enabled) {
     channels.push({
-      type: 'command',
+      type: 'discord',
       label: deliveries.discord.label || 'discord',
       command: deliveries.discord.command || '',
     });
@@ -1154,7 +1156,24 @@ async function sendCommandConnectorHealthAlert(channel, message) {
     sent: result.ok,
     external: true,
     target: channel.label || 'command',
-    detail: result.ok ? result.stdout.trim() : result.stderr.trim() || result.stdout.trim() || `exit ${result.code}`,
+    detail: result.ok ? 'sent' : result.stderr.trim() || result.stdout.trim() || `exit ${result.code}`,
+  };
+}
+
+async function sendDiscordConnectorHealthAlert(channel, message, statusPayload, unhealthyConnectors, fingerprint) {
+  if (!channel.command) {
+    return { sent: false, target: channel.label || 'discord', detail: 'discord command not configured' };
+  }
+  const payload = buildDiscordConnectorHealthPayload(message, statusPayload, unhealthyConnectors, fingerprint);
+  const result = await runShellCommand(String(channel.command), 60_000, {
+    input: JSON.stringify(payload),
+    env: { OPENCLAW_DISCORD_DELIVERY_FORMAT: 'embed' },
+  });
+  return {
+    sent: result.ok,
+    external: true,
+    target: channel.label || 'discord',
+    detail: result.ok ? 'sent' : result.stderr.trim() || result.stdout.trim() || `exit ${result.code}`,
   };
 }
 
@@ -1164,6 +1183,60 @@ function hasExternalNotificationChannel(channels) {
 
 function hasSuccessfulExternalDelivery(results) {
   return results.some((result) => result?.sent === true && result?.external === true);
+}
+
+function discordTruncate(value, maxLength) {
+  const text = String(value || '').replace(/\s+/g, ' ').trim();
+  if (text.length <= maxLength) return text;
+  return `${text.slice(0, Math.max(0, maxLength - 1)).trim()}…`;
+}
+
+function discordField(name, value, inline = false) {
+  return {
+    name: discordTruncate(name, 256) || 'Detail',
+    value: discordTruncate(value, 1024) || '-',
+    inline,
+  };
+}
+
+function connectorStatusColor(unhealthyConnectors) {
+  return unhealthyConnectors.some((entry) => String(entry?.status || '').toLowerCase() === 'blocked')
+    ? 0xd92d20
+    : 0xf79009;
+}
+
+function buildDiscordConnectorHealthPayload(message, statusPayload, unhealthyConnectors, fingerprint) {
+  const fields = unhealthyConnectors.slice(0, 10).map((entry) => {
+    const command = buildConnectorWizardCommand(statusPayload?.configPath || DEFAULT_CONFIG_PATH, entry);
+    const parts = [
+      `Status: ${entry.status || 'blocked'}`,
+      conciseConnectorDetail(entry),
+      command ? `Fix: \`${command}\`` : null,
+      isAscWebAuthIssue(entry)
+        ? 'ASC web-auth only: `ASC_WEB_APPLE_ID="<apple-id>" asc web auth login --apple-id "$ASC_WEB_APPLE_ID"`'
+        : null,
+    ].filter(Boolean);
+    return discordField(humanConnectorName(entry.key), parts.join('\n'));
+  });
+  if (unhealthyConnectors.length > 10) {
+    fields.push(discordField('More issues', `${unhealthyConnectors.length - 10} additional connector(s) need attention.`));
+  }
+  return {
+    content: '',
+    embeds: [
+      {
+        title: `OpenClaw connector health: ${unhealthyConnectors.length} issue(s)`,
+        description: 'Secrets stay in the host terminal or secret store.',
+        color: connectorStatusColor(unhealthyConnectors),
+        fields,
+        footer: {
+          text: `CONNECTOR_HEALTH_ALERT • ${String(fingerprint || '').slice(0, 12)}`,
+        },
+        timestamp: statusPayload?.generatedAt || new Date().toISOString(),
+      },
+    ],
+    fallbackText: message,
+  };
 }
 
 function truncateMessageText(value, maxLength = 96) {
@@ -1559,6 +1632,8 @@ async function deliverConnectorHealthAlert({ config, configPath, message, status
         results.push(await sendSlackConnectorHealthAlert(channel, message));
       } else if (channel.type === 'webhook') {
         results.push(await sendWebhookConnectorHealthAlert(channel, message, statusPayload, unhealthyConnectors, fingerprint));
+      } else if (channel.type === 'discord') {
+        results.push(await sendDiscordConnectorHealthAlert(channel, message, statusPayload, unhealthyConnectors, fingerprint));
       } else if (channel.type === 'command') {
         results.push(await sendCommandConnectorHealthAlert(channel, message));
       } else {
@@ -1693,6 +1768,68 @@ function buildGrowthRunSummaryMessage({ issuesPayload, activeCadences, sourceFil
   return `${lines.join('\n')}\n`;
 }
 
+function growthRunTitle(activeCadences) {
+  if (isShortOperationalCadence(activeCadences)) {
+    return activeCadences.some((cadence) => String(cadence?.key) === 'healthcheck')
+      ? 'OpenClaw healthcheck'
+      : 'OpenClaw daily';
+  }
+  if (isDeepAnalysisCadence(activeCadences)) return 'OpenClaw growth review';
+  return 'OpenClaw growth run';
+}
+
+function buildDiscordGrowthRunPayload(message, issuesPayload, activeCadences, sourceFiles, fingerprint, createdGitHubArtifact, charts = []) {
+  const issues = Array.isArray(issuesPayload?.issues) ? issuesPayload.issues : [];
+  const issueCount = Number(issuesPayload?.issue_count || 0);
+  const fields = [
+    discordField('Cadence', activeCadences.length > 0
+      ? activeCadences.map((cadence) => cadence.title || cadence.key).join(', ')
+      : 'ad-hoc growth pass',
+      false),
+    discordField('Sources', Object.keys(sourceFiles || {}).sort().join(', ') || 'none', true),
+    discordField('Findings', String(issueCount), true),
+  ];
+  if (createdGitHubArtifact) {
+    fields.push(discordField('Action', 'GitHub artifact creation was attempted.', true));
+  }
+  const suppressedIssueCount = Number(issuesPayload?.suppressed_issue_count || 0);
+  if (suppressedIssueCount > 0) {
+    fields.push(discordField('Suppressed today', `${suppressedIssueCount} previously reported finding(s).`, true));
+  }
+  if (charts.length > 0) {
+    fields.push(discordField('Charts', String(charts.length), true));
+  }
+  const groupedIssues = isShortOperationalCadence(activeCadences)
+    ? groupIssuesByProject(issues, 4).map(([project, projectIssues]) => ({
+        name: project,
+        value: projectIssues.map((issue) => formatIssueSummaryLine(issue, 84)).filter(Boolean).join('\n'),
+      }))
+    : issues.slice(0, isDeepAnalysisCadence(activeCadences) ? 5 : 3).map((issue) => ({
+        name: `${issue.priority || 'medium'} • ${issue.area || 'general'}`,
+        value: formatIssueSummaryLine(issue, 96),
+      }));
+  for (const entry of groupedIssues) {
+    if (entry.value) fields.push(discordField(entry.name, entry.value));
+  }
+  const summary = String(issuesPayload?.summary || '').trim();
+  return {
+    content: '',
+    embeds: [
+      {
+        title: `${growthRunTitle(activeCadences)}: ${issueCount > 0 ? `${issueCount} finding(s)` : 'OK'}`,
+        description: discordTruncate(summary || 'No secrets were included.', 500),
+        color: issueCount > 0 ? 0xf79009 : 0x12b76a,
+        fields: fields.slice(0, 20),
+        footer: {
+          text: `GROWTH_RUN • ${String(fingerprint || '').slice(0, 12)}`,
+        },
+        timestamp: new Date().toISOString(),
+      },
+    ],
+    fallbackText: message,
+  };
+}
+
 async function writeConfiguredOpenClawChatGrowthSummary(configPath, channel, message, issuesPayload, activeCadences, fingerprint, charts) {
   const markdownPath = resolveOpenClawChatDeliveryPath(channel.markdownPath, '.openclaw/chat/growth-summary.md');
   const jsonPath = resolveOpenClawChatDeliveryPath(channel.jsonPath, '.openclaw/chat/growth-summary.json');
@@ -1793,7 +1930,32 @@ async function sendCommandGrowthSummary(channel, message) {
     sent: result.ok,
     external: true,
     target: channel.label || 'command',
-    detail: result.ok ? result.stdout.trim() : result.stderr.trim() || result.stdout.trim() || `exit ${result.code}`,
+    detail: result.ok ? 'sent' : result.stderr.trim() || result.stdout.trim() || `exit ${result.code}`,
+  };
+}
+
+async function sendDiscordGrowthSummary(channel, message, issuesPayload, activeCadences, sourceFiles, fingerprint, createdGitHubArtifact, charts) {
+  if (!channel.command) {
+    return { sent: false, target: channel.label || 'discord', detail: 'discord command not configured' };
+  }
+  const payload = buildDiscordGrowthRunPayload(
+    message,
+    issuesPayload,
+    activeCadences,
+    sourceFiles,
+    fingerprint,
+    createdGitHubArtifact,
+    charts,
+  );
+  const result = await runShellCommand(String(channel.command), 60_000, {
+    input: JSON.stringify(payload),
+    env: { OPENCLAW_DISCORD_DELIVERY_FORMAT: 'embed' },
+  });
+  return {
+    sent: result.ok,
+    external: true,
+    target: channel.label || 'discord',
+    detail: result.ok ? 'sent' : result.stderr.trim() || result.stdout.trim() || `exit ${result.code}`,
   };
 }
 
@@ -1841,6 +2003,19 @@ async function deliverGrowthRunSummary({
         results.push(await sendSlackGrowthSummary(channel, message));
       } else if (channel.type === 'webhook') {
         results.push(await sendWebhookGrowthSummary(channel, message, issuesPayload, activeCadences, fingerprint, charts));
+      } else if (channel.type === 'discord') {
+        results.push(
+          await sendDiscordGrowthSummary(
+            channel,
+            message,
+            issuesPayload,
+            activeCadences,
+            sourceFiles,
+            fingerprint,
+            createdGitHubArtifact,
+            charts,
+          ),
+        );
       } else if (channel.type === 'command') {
         results.push(await sendCommandGrowthSummary(channel, message));
       } else {
