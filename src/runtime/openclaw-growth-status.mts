@@ -599,7 +599,7 @@ async function summarizeAsc(preflight, config, timeoutMs) {
       vendorNumber: 'set',
       checkedAppCount: analyticsReadiness.checkedAppCount,
       requestCount: analyticsReadiness.requestCount,
-      webAnalytics: 'optional_fallback_only',
+      analyticsMode: 'api_key_batch_reports',
     });
   }
   return connector('blocked', ascConnection?.detail || 'ASC connection was not verified', {

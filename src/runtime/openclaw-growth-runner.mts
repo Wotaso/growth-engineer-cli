@@ -791,18 +791,6 @@ function conciseConnectorDetail(entry) {
   return detail.length > 180 ? `${detail.slice(0, 177)}...` : detail;
 }
 
-function isAscWebAuthIssue(entry) {
-  if (entry.key !== 'appStoreConnect') return false;
-  const text = `${entry.detail || ''}\n${entry.nextAction || ''}`.toLowerCase();
-  return (
-    text.includes('asc web auth') ||
-    text.includes('asc_web_apple_id') ||
-    text.includes('web analytics') ||
-    text.includes('webauth') ||
-    text.includes('web auth')
-  );
-}
-
 function buildConnectorHealthAlert(statusPayload, unhealthyConnectors) {
   const configPath = statusPayload?.configPath || DEFAULT_CONFIG_PATH;
   const lines = [`OpenClaw connector health: ${unhealthyConnectors.length} issue(s)`];
@@ -812,9 +800,6 @@ function buildConnectorHealthAlert(statusPayload, unhealthyConnectors) {
     const command = buildConnectorWizardCommand(configPath, entry);
     if (command) {
       lines.push(`  Fix: \`${command}\``);
-    }
-    if (isAscWebAuthIssue(entry)) {
-      lines.push('  ASC web-auth only: `ASC_WEB_APPLE_ID="<apple-id>" asc web auth login --apple-id "$ASC_WEB_APPLE_ID"`');
     }
   }
 
@@ -1212,9 +1197,6 @@ function buildDiscordConnectorHealthPayload(message, statusPayload, unhealthyCon
       `Status: ${entry.status || 'blocked'}`,
       conciseConnectorDetail(entry),
       command ? `Fix: \`${command}\`` : null,
-      isAscWebAuthIssue(entry)
-        ? 'ASC web-auth only: `ASC_WEB_APPLE_ID="<apple-id>" asc web auth login --apple-id "$ASC_WEB_APPLE_ID"`'
-        : null,
     ].filter(Boolean);
     return discordField(humanConnectorName(entry.key), parts.join('\n'));
   });

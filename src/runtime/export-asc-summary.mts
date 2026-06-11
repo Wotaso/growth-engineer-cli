@@ -5,8 +5,12 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import process from 'node:process';
+import { promisify } from 'node:util';
+import { gunzip } from 'node:zlib';
 import { buildAscSummary, writeJsonOutput } from './openclaw-exporters-lib.mjs';
 import { loadOpenClawGrowthSecrets } from './openclaw-growth-env.mjs';
+
+const gunzipAsync = promisify(gunzip);
 
 function printHelpAndExit(exitCode, reason = null) {
   if (reason) {
@@ -23,11 +27,10 @@ Usage:
 Options:
   --app <id>             Optional App Store Connect app ID filter (defaults to all accessible apps)
   --out <file>           Write JSON to file instead of stdout
-  --start <date>         App Store Connect Analytics start date (YYYY-MM-DD, default: last 30 complete days)
-  --end <date>           App Store Connect Analytics end date (YYYY-MM-DD, default: yesterday UTC)
+  --start <date>         App Store Connect Analytics start date (YYYY-MM-DD, default: 30 complete days)
+  --end <date>           App Store Connect Analytics end date (YYYY-MM-DD, default: two days ago UTC)
   --cache-dir <dir>      Cache downloaded ASC batch reports (default: data/openclaw-growth-engineer/asc-cache)
-  --include-web-analytics Include experimental ASC web analytics queries only when API reports are insufficient
-  --skip-web-analytics   Deprecated no-op; web analytics is skipped by default
+  --force-refresh        Re-download reports even when the daily cache already has them
   --country <code>       Ratings country override (default: all countries)
   --reviews-limit <n>    Review summarizations limit (default: 20)
   --feedback-limit <n>   TestFlight feedback limit (default: 20)
@@ -39,7 +42,7 @@ Options:
 }
 
 function parseArgs(argv) {
-  const defaultEnd = formatDate(addDays(new Date(), -1));
+  const defaultEnd = formatDate(addDays(new Date(), -2));
   const defaultStart = formatDate(addDays(parseDate(defaultEnd), -29));
   const args = {
     app: '',
@@ -47,7 +50,7 @@ function parseArgs(argv) {
     start: String(process.env.ASC_ANALYTICS_START || defaultStart).trim(),
     end: String(process.env.ASC_ANALYTICS_END || defaultEnd).trim(),
     cacheDir: String(process.env.ASC_BATCH_CACHE_DIR || 'data/openclaw-growth-engineer/asc-cache').trim(),
-    webAnalytics: ['1', 'true', 'yes'].includes(String(process.env.ASC_INCLUDE_WEB_ANALYTICS || '').toLowerCase()),
+    forceRefresh: ['1', 'true', 'yes'].includes(String(process.env.ASC_FORCE_REFRESH || '').toLowerCase()),
     country: '',
     reviewsLimit: 20,
     feedbackLimit: 20,
@@ -76,10 +79,8 @@ function parseArgs(argv) {
     } else if (token === '--cache-dir') {
       args.cacheDir = String(next || '').trim();
       index += 1;
-    } else if (token === '--include-web-analytics') {
-      args.webAnalytics = true;
-    } else if (token === '--skip-web-analytics') {
-      args.webAnalytics = false;
+    } else if (token === '--force-refresh') {
+      args.forceRefresh = true;
     } else if (token === '--country') {
       args.country = String(next || '').trim();
       index += 1;
@@ -221,6 +222,46 @@ function finishMetricTotals(metrics) {
   }));
 }
 
+function addBreakdownMetric(target, key, field, value) {
+  if (!key || value === null || value === undefined || !Number.isFinite(Number(value))) return;
+  const existing = target.get(key) || {
+    key,
+    title: key,
+    impressions: 0,
+    pageViewUnique: 0,
+    units: 0,
+    redownloads: 0,
+    purchases: 0,
+    proceeds: 0,
+    crashes: 0,
+  };
+  existing[field] = (existing[field] || 0) + Number(value);
+  target.set(key, existing);
+}
+
+async function fileExists(filePath) {
+  try {
+    await fs.access(filePath);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function readReportText(filePath) {
+  const buffer = await fs.readFile(filePath);
+  if (buffer.length >= 2 && buffer[0] === 0x1f && buffer[1] === 0x8b) {
+    return (await gunzipAsync(buffer)).toString('utf8');
+  }
+  return buffer.toString('utf8');
+}
+
+async function materializeParsedReport(rawPath, parsedPath) {
+  const content = await readReportText(rawPath);
+  await fs.mkdir(path.dirname(parsedPath), { recursive: true });
+  await fs.writeFile(parsedPath, content, 'utf8');
+}
+
 function splitDelimitedLine(line, delimiter) {
   const cells = [];
   let current = '';
@@ -246,7 +287,7 @@ function splitDelimitedLine(line, delimiter) {
 }
 
 async function parseDelimitedReport(filePath) {
-  const content = await fs.readFile(filePath, 'utf8');
+  const content = await readReportText(filePath);
   const lines = content.split(/\r?\n/).filter((line) => line.trim());
   if (lines.length < 2) return [];
   const delimiter = lines[0].includes('\t') ? '\t' : ',';
@@ -270,8 +311,114 @@ function findHeader(row, candidates) {
   return null;
 }
 
+function firstRowValue(row, candidates) {
+  const header = findHeader(row, candidates);
+  if (!header) return null;
+  const value = String(row[header] || '').trim();
+  return value || null;
+}
+
+function reportCachePaths(appCacheDir, baseName) {
+  const safeBase = String(baseName || 'report').replace(/[^a-zA-Z0-9._-]+/g, '-');
+  return {
+    rawPath: path.join(appCacheDir, `${safeBase}.txt.gz`),
+    parsedPath: path.join(appCacheDir, `${safeBase}.txt`),
+    manifestPath: path.join(appCacheDir, `${safeBase}.manifest.json`),
+  };
+}
+
+async function loadCachedReport(label, paths) {
+  if (await fileExists(paths.parsedPath)) {
+    const rows = await parseDelimitedReport(paths.parsedPath);
+    return { label, outputPath: paths.parsedPath, rows, cacheStatus: 'hit' };
+  }
+  if (await fileExists(paths.rawPath)) {
+    await materializeParsedReport(paths.rawPath, paths.parsedPath);
+    const rows = await parseDelimitedReport(paths.parsedPath);
+    return { label, outputPath: paths.parsedPath, rows, cacheStatus: 'hit_raw' };
+  }
+  return null;
+}
+
+async function writeReportManifest(paths, report) {
+  await fs.writeFile(
+    paths.manifestPath,
+    `${JSON.stringify(
+      {
+        label: report.label,
+        fetchedAt: new Date().toISOString(),
+        outputPath: report.outputPath,
+        rowCount: report.rows.length,
+        cacheStatus: report.cacheStatus,
+      },
+      null,
+      2,
+    )}\n`,
+    'utf8',
+  );
+}
+
+async function loadCachedReportsFromDir(appCacheDir, warnings, reason) {
+  let entries = [];
+  try {
+    entries = await fs.readdir(appCacheDir);
+  } catch {
+    return [];
+  }
+  const manifests = entries.filter((entry) => entry.endsWith('.manifest.json')).sort();
+  const reports = [];
+  for (const manifestName of manifests) {
+    try {
+      const manifestPath = path.join(appCacheDir, manifestName);
+      const manifest = JSON.parse(await fs.readFile(manifestPath, 'utf8'));
+      const parsedPath = String(manifest.outputPath || '').trim();
+      if (!parsedPath || !(await fileExists(parsedPath))) continue;
+      const rows = await parseDelimitedReport(parsedPath);
+      reports.push({
+        label: String(manifest.label || manifestName.replace(/\.manifest\.json$/, '')),
+        outputPath: parsedPath,
+        rows,
+        cacheStatus: 'fallback_hit',
+      });
+    } catch {
+      // Ignore malformed cache entries; a fresh download will repair them.
+    }
+  }
+  if (reports.length > 0 && reason) {
+    warnings.push(`${reason}: using ${reports.length} cached ASC report(s) from ${appCacheDir}`);
+  }
+  return reports;
+}
+
+async function loadLatestCachedReports(appCacheRoot, requestedEnd, warnings) {
+  let entries = [];
+  try {
+    entries = await fs.readdir(appCacheRoot, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+  const requestedTime = parseDate(requestedEnd).getTime();
+  const dateDirs = entries
+    .filter((entry) => entry.isDirectory() && /^\d{4}-\d{2}-\d{2}$/.test(entry.name))
+    .map((entry) => entry.name)
+    .filter((date) => parseDate(date).getTime() <= requestedTime)
+    .sort()
+    .reverse();
+  for (const date of dateDirs) {
+    const reports = await loadCachedReportsFromDir(
+      path.join(appCacheRoot, date),
+      warnings,
+      `ASC App Analytics batch report unavailable for ${requestedEnd}`,
+    );
+    if (reports.length > 0) return reports;
+  }
+  return [];
+}
+
 function summarizeBatchRows(rows, appId) {
   const metrics = new Map();
+  const sourceBreakdowns = new Map();
+  const crashBreakdowns = new Map();
   for (const row of rows) {
     const appIdHeader = findHeader(row, ['apple identifier', 'app apple identifier', 'app id', 'adam id']);
     if (appIdHeader && String(row[appIdHeader] || '').trim() && String(row[appIdHeader]).trim() !== String(appId)) {
@@ -280,12 +427,21 @@ function summarizeBatchRows(rows, appId) {
     const dateHeader = findHeader(row, ['date', 'begin date', 'start date', 'end date']);
     const date = dateHeader ? String(row[dateHeader] || '').slice(0, 10) : null;
     const fields = [
+      { measure: 'impressions', candidates: ['impressions', 'unique impressions', 'impression count'] },
+      { measure: 'pageViewUnique', candidates: ['unique product page views', 'product page views', 'page views', 'page view count', 'page views unique'] },
       { measure: 'units', candidates: ['units', 'app units', 'downloads', 'first-time downloads'] },
       { measure: 'redownloads', candidates: ['redownloads', 're-downloads'] },
       { measure: 'conversionRate', candidates: ['conversion rate', 'app store conversion rate'], rate: true },
       { measure: 'crashRate', candidates: ['crash rate'], rate: true },
       { measure: 'crashes', candidates: ['crashes', 'crash count'] },
-      { measure: 'pageViewUnique', candidates: ['unique product page views', 'product page views', 'page views'] },
+      { measure: 'sessions', candidates: ['sessions', 'session count'] },
+      { measure: 'activeDevices', candidates: ['active devices', 'active devices count', 'unique devices'] },
+      { measure: 'installations', candidates: ['installations', 'installs', 'app installations'] },
+      { measure: 'deletions', candidates: ['deletions', 'deletes', 'app deletions'] },
+      { measure: 'purchases', candidates: ['purchases', 'purchase count', 'sales', 'paying purchases'] },
+      { measure: 'payingUsers', candidates: ['paying users', 'unique paying users'] },
+      { measure: 'subscriptions', candidates: ['subscriptions', 'active subscriptions', 'paid subscriptions'] },
+      { measure: 'trialStarts', candidates: ['trial starts', 'free trial starts', 'introductory offer starts'] },
       { measure: 'proceeds', candidates: ['developer proceeds', 'proceeds'] },
     ];
     for (const field of fields) {
@@ -293,8 +449,53 @@ function summarizeBatchRows(rows, appId) {
       if (!header) continue;
       addMetricTotals(metrics, field.measure, coerceNumber(row[header]), date, { rate: Boolean(field.rate) });
     }
+
+    const source =
+      firstRowValue(row, ['source type', 'download source type', 'source', 'source name', 'referrer', 'app referrer', 'web referrer', 'campaign']) ||
+      firstRowValue(row, ['page type', 'event type']);
+    if (source) {
+      const sourceFields = [
+        { field: 'impressions', candidates: ['impressions', 'unique impressions', 'impression count'] },
+        { field: 'pageViewUnique', candidates: ['unique product page views', 'product page views', 'page views', 'page view count', 'page views unique'] },
+        { field: 'units', candidates: ['units', 'app units', 'downloads', 'first-time downloads'] },
+        { field: 'redownloads', candidates: ['redownloads', 're-downloads'] },
+        { field: 'purchases', candidates: ['purchases', 'purchase count', 'sales'] },
+        { field: 'proceeds', candidates: ['developer proceeds', 'proceeds'] },
+      ];
+      for (const field of sourceFields) {
+        const header = findHeader(row, field.candidates);
+        if (header) addBreakdownMetric(sourceBreakdowns, source, field.field, coerceNumber(row[header]));
+      }
+    }
+
+    const crashesHeader = findHeader(row, ['crashes', 'crash count']);
+    const crashes = crashesHeader ? coerceNumber(row[crashesHeader]) : null;
+    if (crashes !== null && crashes > 0) {
+      const version = firstRowValue(row, ['app version', 'version', 'app version number']) || 'Unknown app version';
+      const platform = firstRowValue(row, ['platform', 'device type', 'device', 'os']) || '';
+      const key = `${version}${platform ? ` (${platform})` : ''}`;
+      addBreakdownMetric(crashBreakdowns, key, 'crashes', crashes);
+    }
   }
-  return { results: finishMetricTotals(metrics) };
+  const results = finishMetricTotals(metrics);
+  return {
+    results,
+    sourceBreakdown: [...sourceBreakdowns.values()]
+      .filter((entry) => entry.impressions > 0 || entry.pageViewUnique > 0 || entry.units > 0 || entry.purchases > 0 || entry.proceeds > 0)
+      .sort((a, b) => (b.pageViewUnique || b.impressions || b.units || 0) - (a.pageViewUnique || a.impressions || a.units || 0)),
+    crashBreakdown: [...crashBreakdowns.values()]
+      .map((entry) => ({ label: entry.title, value: entry.crashes }))
+      .filter((entry) => entry.value > 0)
+      .sort((a, b) => b.value - a.value),
+    overviewMetricCatalog: results.map((metric) => ({
+      section: 'batchReports',
+      measure: metric.measure,
+      total: metric.total,
+      previousTotal: metric.previousTotal,
+      percentChange: metric.percentChange,
+      type: 'COUNT',
+    })),
+  };
 }
 
 function extractItems(payload) {
@@ -331,21 +532,45 @@ function extractInstances(payload) {
   return [...byId.values()];
 }
 
-async function downloadAndParseReport(label, commandArgs, outputPath, warnings) {
+async function downloadAndParseReport(label, commandArgs, appCacheDir, baseName, args, warnings) {
+  const paths = reportCachePaths(appCacheDir, baseName);
+  if (!args.forceRefresh) {
+    const cached = await loadCachedReport(label, paths);
+    if (cached) return cached;
+  }
+
   try {
-    await fs.mkdir(path.dirname(outputPath), { recursive: true });
-    await runJsonCommand('asc', [...commandArgs, '--output', outputPath, '--decompress']);
-    const rows = await parseDelimitedReport(outputPath);
-    return { label, outputPath, rows };
+    await fs.mkdir(appCacheDir, { recursive: true });
+    await runJsonCommand('asc', [...commandArgs, '--output', paths.rawPath]);
+    await materializeParsedReport(paths.rawPath, paths.parsedPath);
+    const rows = await parseDelimitedReport(paths.parsedPath);
+    const report = { label, outputPath: paths.parsedPath, rows, cacheStatus: 'downloaded' };
+    await writeReportManifest(paths, report);
+    return report;
   } catch (error) {
-    warnings.push(`${label}: ${error instanceof Error ? error.message : String(error)}`);
-    return null;
+    const compressedError = error instanceof Error ? error.message : String(error);
+    try {
+      await runJsonCommand('asc', [...commandArgs, '--output', paths.parsedPath, '--decompress']);
+      const rows = await parseDelimitedReport(paths.parsedPath);
+      const report = { label, outputPath: paths.parsedPath, rows, cacheStatus: 'downloaded_decompressed' };
+      await writeReportManifest(paths, report);
+      return report;
+    } catch (fallbackError) {
+      const cached = await loadCachedReport(label, paths);
+      if (cached) {
+        warnings.push(`${label}: fresh download failed; using cached report (${compressedError})`);
+        return cached;
+      }
+      warnings.push(`${label}: ${fallbackError instanceof Error ? fallbackError.message : String(fallbackError)}`);
+      return null;
+    }
   }
 }
 
 async function downloadBatchAnalyticsReports(appId, args, warnings) {
   const reports = [];
-  const appCacheDir = path.resolve(args.cacheDir || path.join(os.tmpdir(), 'openclaw-asc-cache'), appId, args.end);
+  const appCacheRoot = path.resolve(args.cacheDir || path.join(os.tmpdir(), 'openclaw-asc-cache'), appId);
+  const appCacheDir = path.join(appCacheRoot, args.end);
 
   const vendor = String(process.env.ASC_VENDOR_NUMBER || '').trim();
   if (vendor) {
@@ -365,7 +590,9 @@ async function downloadBatchAnalyticsReports(appId, args, warnings) {
         '--date',
         args.end,
       ],
-      path.join(appCacheDir, 'sales-daily.tsv'),
+      appCacheDir,
+      'sales-daily',
+      args,
       warnings,
     );
     if (sales) reports.push(sales);
@@ -409,11 +636,11 @@ async function downloadBatchAnalyticsReports(appId, args, warnings) {
           ? `ASC App Analytics batch report: created ongoing analytics request ${createdRequestId}; report instances will be available after Apple finishes processing`
           : 'ASC App Analytics batch report: requested ongoing analytics access; report instances will be available after Apple finishes processing',
       );
-      return reports;
+      return reports.length > 0 ? reports : loadLatestCachedReports(appCacheRoot, args.end, warnings);
     }
     requestId = existingRequestId;
     warnings.push(`ASC App Analytics batch report: request ${requestId} is not completed yet; using other ASC API-key surfaces for this run`);
-    return reports;
+    return reports.length > 0 ? reports : loadLatestCachedReports(appCacheRoot, args.end, warnings);
   }
 
   const viewPayload = await runBestEffortAscQuery('ASC analytics reports view query', [
@@ -431,14 +658,18 @@ async function downloadBatchAnalyticsReports(appId, args, warnings) {
   const instances = extractInstances(viewPayload).slice(0, Math.max(1, Number(args.analyticsInstanceLimit) || 8));
   if (instances.length === 0) {
     warnings.push(`ASC App Analytics batch report: request ${requestId} has no downloadable instances for ${args.end}`);
-    return reports;
+    const cached = await loadCachedReportsFromDir(appCacheDir, warnings, 'ASC App Analytics batch report has no downloadable instances');
+    if (reports.length > 0 || cached.length > 0) return [...reports, ...cached];
+    return loadLatestCachedReports(appCacheRoot, args.end, warnings);
   }
 
   for (const instance of instances) {
     const report = await downloadAndParseReport(
       `ASC App Analytics batch report ${instance.id}`,
       ['analytics', 'download', '--request-id', requestId, '--instance-id', instance.id],
-      path.join(appCacheDir, `analytics-${instance.id}.csv`),
+      appCacheDir,
+      `analytics-${instance.id}`,
+      args,
       warnings,
     );
     if (report) reports.push(report);
@@ -537,67 +768,12 @@ async function buildSingleAppSummary(appId, args) {
   const batchRows = batchReports.flatMap((report) => report.rows);
   const batchAnalyticsPayload = batchRows.length > 0 ? summarizeBatchRows(batchRows, appId) : null;
 
-  const analyticsMetricsPayload = args.webAnalytics
-    ? await runBestEffortAscQuery('ASC web analytics metrics query', [
-        'web',
-        'analytics',
-        'metrics',
-        '--app',
-        appId,
-        '--start',
-        args.start,
-        '--end',
-        args.end,
-        '--frequency',
-        'day',
-        '--measures',
-        'units,redownloads,conversionRate,crashRate',
-        '--output',
-        'json',
-      ], warnings)
-    : null;
-
-  const analyticsSourcesPayload = args.webAnalytics
-    ? await runBestEffortAscQuery('ASC web analytics sources query', [
-        'web',
-        'analytics',
-        'sources',
-        '--app',
-        appId,
-        '--start',
-        args.start,
-        '--end',
-        args.end,
-        '--output',
-        'json',
-      ], warnings)
-    : null;
-
-  const analyticsOverviewPayload = args.webAnalytics
-    ? await runBestEffortAscQuery('ASC web analytics overview query', [
-        'web',
-        'analytics',
-        'overview',
-        '--app',
-        appId,
-        '--start',
-        args.start,
-        '--end',
-        args.end,
-        '--output',
-        'json',
-      ], warnings)
-    : null;
-
   return buildAscSummary({
     appId,
     statusPayload,
     ratingsPayload,
     reviewSummariesPayload,
     feedbackPayload,
-    analyticsMetricsPayload,
-    analyticsSourcesPayload,
-    analyticsOverviewPayload,
     batchAnalyticsPayload,
     analyticsWindow: { start: args.start, end: args.end },
     analyticsWarnings: warnings,
@@ -605,6 +781,7 @@ async function buildSingleAppSummary(appId, args) {
       label: report.label,
       outputPath: report.outputPath,
       rowCount: report.rows.length,
+      cacheStatus: report.cacheStatus || null,
     })),
     maxSignals: args.maxSignals,
   });

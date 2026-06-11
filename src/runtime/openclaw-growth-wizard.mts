@@ -4211,7 +4211,7 @@ async function guideCoolifyConnector(rl, secrets: Record<string, string>) {
 async function guideAscConnector(rl, secrets: Record<string, string>) {
   printSection('App Store Connect CLI', [
     'Use this mainly for App Store analytics batch reports, plus builds, TestFlight, reviews, ratings, and store context.',
-    'The normal Growth Engineer path uses App Store Connect API-key reports. Experimental ASC web analytics is not part of setup.',
+    'Growth Engineer uses App Store Connect API-key reports only. Web login is not part of setup or health checks.',
   ]);
   process.stdout.write('Create an App Store Connect API key here:\n  https://appstoreconnect.apple.com/access/integrations/api\n\n');
   process.stdout.write('Roles to choose for this key:\n');
