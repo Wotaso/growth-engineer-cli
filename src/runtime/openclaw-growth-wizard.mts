@@ -157,7 +157,7 @@ const CONNECTOR_DEFINITIONS: ConnectorDefinition[] = [
     key: 'asc',
     label: 'ASC / App Store Connect CLI',
     summary: 'Read App Store analytics, reviews/ratings, builds/TestFlight/release context, subscriptions, purchases, and crash totals.',
-    needs: 'ASC_KEY_ID, ASC_ISSUER_ID, and the AuthKey_XXXX.p8 content or path.',
+    needs: 'Two App Store Connect API keys: a Sales and Reports or Finance key for ongoing use, plus a temporary Admin key for one-time analytics bootstrap.',
   },
   {
     key: 'stripe',
@@ -2698,6 +2698,7 @@ async function runImmediateConnectorHealthCheck({
   configPath,
   connector,
   secrets,
+  runtimeEnv = {},
   sentryAccounts = [],
   paddleAccounts = [],
 }) {
@@ -2712,6 +2713,7 @@ async function runImmediateConnectorHealthCheck({
   const env = {
     ...process.env,
     ...secrets,
+    ...runtimeEnv,
   };
   const command = `${nodeRuntimeScriptCommand('openclaw-growth-start.mjs')} --config ${quote(configPath)} --setup-only --connectors ${quote(connector)} --only-connectors ${quote(connector)}`;
   let result = await runSetupCommandWithProgress(
@@ -2874,12 +2876,12 @@ function resolveSecretsFile() {
   return path.resolve('.openclaw-growth-secrets.env');
 }
 
-function resolveAscPrivateKeyPath(keyId: string) {
+function resolveAscPrivateKeyPath(keyId: string, suffix = '') {
   const safeKeyId = (keyId || 'OPENCLAW').trim().replace(/[^a-zA-Z0-9_-]/g, '_') || 'OPENCLAW';
   const baseDir = process.env.HOME
     ? path.join(process.env.HOME, '.config', 'openclaw-growth')
     : path.resolve('.openclaw-growth');
-  return path.join(baseDir, `AuthKey_${safeKeyId}.p8`);
+  return path.join(baseDir, `AuthKey_${safeKeyId}${suffix}.p8`);
 }
 
 function renderEnvValue(value) {
@@ -3618,14 +3620,16 @@ function validateAscPrivateKeyContent(value) {
   }
 }
 
-async function askAscPrivateKeyContent(rl) {
+async function askAscPrivateKeyContent(rl, options: { envName?: string; persistLabel?: string } = {}) {
+  const envName = options.envName || 'ASC_PRIVATE_KEY';
+  const persistLabel = options.persistLabel || 'ASC_PRIVATE_KEY_PATH';
   process.stdout.write(
     '\nPaste the full .p8 file content here. Leave the first line empty if you already saved the .p8 file on this host.\n',
   );
-  process.stdout.write('The wizard validates the pasted key, stores it locally with chmod 600, and only saves ASC_PRIVATE_KEY_PATH.\n');
+  process.stdout.write(`The wizard validates the pasted key, stores it locally with chmod 600, and only saves ${persistLabel}.\n`);
 
   while (true) {
-    const value = await readAscPrivateKeyPaste(rl);
+    const value = await readAscPrivateKeyPaste(rl, envName);
     if (!value.trim()) return '';
     const validation = validateAscPrivateKeyContent(value);
     if (validation.ok) return validation.value;
@@ -3635,7 +3639,7 @@ async function askAscPrivateKeyContent(rl) {
   }
 }
 
-async function readAscPrivateKeyPaste(rl) {
+async function readAscPrivateKeyPaste(rl, envName = 'ASC_PRIVATE_KEY') {
   return await new Promise<string>((resolve, reject) => {
     let buffer = '';
     let settled = false;
@@ -3700,7 +3704,7 @@ async function readAscPrivateKeyPaste(rl) {
     process.stdin.setEncoding('utf8');
     process.stdin.on('data', onData);
     process.stdin.on('error', onError);
-    process.stdout.write('ASC_PRIVATE_KEY content: ');
+    process.stdout.write(`${envName} content: `);
     process.stdin.resume();
   });
 }
@@ -3710,12 +3714,14 @@ async function validateAscPrivateKeyPath(filePath) {
   return validateAscPrivateKeyContent(raw);
 }
 
-async function askAscPrivateKeyPath(rl) {
+async function askAscPrivateKeyPath(rl, options: { label?: string; defaultValue?: string } = {}) {
+  const label = options.label || 'ASC_PRIVATE_KEY_PATH (path to AuthKey_XXXX.p8, leave empty to skip)';
+  const defaultValue = options.defaultValue ?? process.env.ASC_PRIVATE_KEY_PATH ?? '';
   while (true) {
     const privateKeyPath = await ask(
       rl,
-      'ASC_PRIVATE_KEY_PATH (path to AuthKey_XXXX.p8, leave empty to skip)',
-      process.env.ASC_PRIVATE_KEY_PATH || '',
+      label,
+      defaultValue,
     );
     const trimmedPath = privateKeyPath.trim();
     if (!trimmedPath) return '';
@@ -4213,23 +4219,37 @@ async function guideAscConnector(rl, secrets: Record<string, string>) {
     'Use this mainly for App Store analytics batch reports, plus builds, TestFlight, reviews, ratings, and store context.',
     'Growth Engineer uses App Store Connect API-key reports only. Web login is not part of setup or health checks.',
   ]);
-  process.stdout.write('Create an App Store Connect API key here:\n  https://appstoreconnect.apple.com/access/integrations/api\n\n');
-  process.stdout.write('Roles to choose for this key:\n');
+  process.stdout.write('Create two App Store Connect API keys before continuing:\n  https://appstoreconnect.apple.com/access/integrations/api\n\n');
   printBullets([
-    'Required for first setup: Admin, because Apple only allows Admin keys to create the initial Analytics Report Request.',
-    'Required for steady-state report downloads after the request exists: Sales and Reports, Finance, or Admin.',
+    'Steady-state key: Sales and Reports, or Finance. Growth Engineer stores this key for normal analytics downloads.',
+    'Temporary bootstrap key: Admin. Growth Engineer uses this once to initialize App Analytics report generation, does not save it to secrets.env, and deletes the local Admin .p8 immediately after analytics initialization.',
+    'After setup, revoke the temporary Admin API key in App Store Connect.',
+  ]);
+  process.stdout.write('\nRoles to choose:\n');
+  printBullets([
+    'Recommended for normal continuous analytics downloads: Sales and Reports.',
+    'Finance also works for generated analytics report downloads.',
+    'Admin is not required for daily or continuous analytics ingestion once an ONGOING Analytics Report Request already exists.',
+    'Growth Engineer setup requires a temporary Admin bootstrap key so it can create the initial Analytics Report Request when it is missing.',
     'Recommended: Customer Support, for App Store ratings and review text.',
     'Recommended: Developer, for builds, TestFlight, and delivery status.',
     'Optional: App Manager, only if OpenClaw should also read or manage app metadata, pricing, or release settings.',
-    'Least privilege option: run setup once with Admin, then rotate Growth Engineer to a Sales and Reports key for ongoing analytics downloads.',
+    'Least privilege steady state: keep Growth Engineer configured with Sales and Reports, and use the Admin key only temporarily during setup.',
   ]);
-  process.stdout.write('\nWhy Admin is requested during setup:\n');
+  process.stdout.write('\nWhy an Admin key may be requested during setup:\n');
   printBullets([
-    'Growth Engineer automatically creates an ongoing App Analytics report request when none exists.',
-    'Without that request, Apple will not generate Impressions, Product Page Views, App Units, Conversion Rate, and related report instances.',
-    'A non-Admin key can read existing reports, but creation fails with a forbidden response.',
+    'Growth Engineer first checks for existing ongoing App Analytics report requests.',
+    'If a request already exists, daily ingestion only reads generated report instances and downloads segments; Admin is not needed.',
+    'If no request exists and Growth Engineer must create one, Apple requires an Admin-role API key for that creation step.',
+    'After the request exists, remove or revoke the temporary Admin key and keep using Sales and Reports or Finance for steady-state downloads.',
   ]);
-  process.stdout.write('\nAfter creating the key, copy these values into this wizard:\n');
+  process.stdout.write('\nImportant:\n');
+  printBullets([
+    'An Analytics Report Request is Apple\'s persistent report-generation subscription.',
+    'Daily ingestion does not create a new request every day.',
+    'The wizard stores only the normal ASC key for operation; the temporary Admin key is not saved and its local .p8 is deleted after analytics initialization.',
+  ]);
+  process.stdout.write('\nFor the steady-state key, copy these values into this wizard:\n');
   printBullets([
     'Issuer ID from the API keys page.',
     'Key ID from the API key row or from the downloaded file name: AuthKey_<KEY_ID>.p8.',
@@ -4262,6 +4282,73 @@ async function guideAscConnector(rl, secrets: Record<string, string>) {
     process.env.ASC_VENDOR_NUMBER || '',
   );
   if (vendorNumber.trim()) secrets.ASC_VENDOR_NUMBER = vendorNumber.trim();
+
+  return await guideAscBootstrapAdminKey(rl, issuerId.trim());
+}
+
+async function guideAscBootstrapAdminKey(rl, issuerIdDefault = '') {
+  const bootstrapEnv: Record<string, string> = {};
+  process.stdout.write('\nTemporary Admin bootstrap key required for ASC analytics setup\n');
+  printBullets([
+    'The normal key is used for ongoing analytics downloads; the Admin key is only for one-time report-request bootstrap.',
+    'Apple requires an Admin-role API key for that creation step.',
+    'The wizard does not save these ASC_BOOTSTRAP_* values to secrets.env.',
+    'If you paste the .p8 content here, the local temporary .p8 file is deleted immediately after analytics initialization.',
+    'After setup, you can also revoke the temporary Admin API key in App Store Connect.',
+  ]);
+  const bootstrapKeyId = await ask(rl, 'ASC_BOOTSTRAP_KEY_ID (temporary Admin key, required)', '');
+  const bootstrapIssuerId = await ask(rl, 'ASC_BOOTSTRAP_ISSUER_ID (temporary Admin key)', issuerIdDefault);
+  if (!bootstrapKeyId.trim() || !bootstrapIssuerId.trim()) return { bootstrapEnv };
+  bootstrapEnv.ASC_BOOTSTRAP_KEY_ID = bootstrapKeyId.trim();
+  bootstrapEnv.ASC_BOOTSTRAP_ISSUER_ID = bootstrapIssuerId.trim();
+
+  const bootstrapPrivateKeyContent = await askAscPrivateKeyContent(rl, {
+    envName: 'ASC_BOOTSTRAP_PRIVATE_KEY',
+    persistLabel: 'ASC_BOOTSTRAP_PRIVATE_KEY_PATH temporarily',
+  });
+  if (bootstrapPrivateKeyContent) {
+    const bootstrapPrivateKeyPath = resolveAscPrivateKeyPath(bootstrapKeyId, '_bootstrap_admin');
+    await fs.mkdir(path.dirname(bootstrapPrivateKeyPath), { recursive: true, mode: 0o700 });
+    await fs.writeFile(bootstrapPrivateKeyPath, bootstrapPrivateKeyContent, { encoding: 'utf8', mode: 0o600 });
+    await fs.chmod(bootstrapPrivateKeyPath, 0o600);
+    bootstrapEnv.ASC_BOOTSTRAP_PRIVATE_KEY_PATH = bootstrapPrivateKeyPath;
+    bootstrapEnv.ASC_BOOTSTRAP_PRIVATE_KEY_DELETE_AFTER_USE = '1';
+    process.stdout.write(`Saved temporary Admin ASC private key to ${bootstrapPrivateKeyPath} with chmod 600. It will be deleted after the setup check.\n`);
+  } else {
+    const bootstrapPrivateKeyPath = await askAscPrivateKeyPath(rl, {
+      label: 'ASC_BOOTSTRAP_PRIVATE_KEY_PATH (temporary Admin AuthKey_XXXX.p8 path, leave empty to skip)',
+      defaultValue: '',
+    });
+    if (bootstrapPrivateKeyPath.trim()) {
+      bootstrapEnv.ASC_BOOTSTRAP_PRIVATE_KEY_PATH = bootstrapPrivateKeyPath.trim();
+      const shouldDelete = await askYesNo(rl, 'Delete this temporary Admin .p8 file from this host after the setup check?', true);
+      if (shouldDelete) bootstrapEnv.ASC_BOOTSTRAP_PRIVATE_KEY_DELETE_AFTER_USE = '1';
+    }
+  }
+  return { bootstrapEnv };
+}
+
+async function cleanupTemporaryAscBootstrapPrivateKey(bootstrapEnv: Record<string, string> = {}) {
+  const privateKeyPath = String(bootstrapEnv.ASC_BOOTSTRAP_PRIVATE_KEY_PATH || '').trim();
+  const shouldDelete = String(bootstrapEnv.ASC_BOOTSTRAP_PRIVATE_KEY_DELETE_AFTER_USE || '').trim().toLowerCase();
+  if (!privateKeyPath || !['1', 'true', 'yes'].includes(shouldDelete)) return;
+  if (privateKeyPath === String(bootstrapEnv.ASC_PRIVATE_KEY_PATH || process.env.ASC_PRIVATE_KEY_PATH || '').trim()) {
+    process.stdout.write('Temporary Admin .p8 path matches the steady-state ASC_PRIVATE_KEY_PATH; leaving it in place.\n');
+    process.stdout.write('You can also revoke the temporary Admin API key in App Store Connect.\n');
+    return;
+  }
+  try {
+    await fs.unlink(privateKeyPath);
+    process.stdout.write(`Deleted temporary Admin .p8 from ${privateKeyPath}.\n`);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code === 'ENOENT') {
+      process.stdout.write(`Temporary Admin .p8 was already absent at ${privateKeyPath}.\n`);
+      process.stdout.write('You can also revoke the temporary Admin API key in App Store Connect.\n');
+      return;
+    }
+    process.stdout.write(`Could not delete temporary Admin .p8 at ${privateKeyPath}: ${error instanceof Error ? error.message : String(error)}\n`);
+  }
+  process.stdout.write('You can also revoke the temporary Admin API key in App Store Connect.\n');
 }
 
 async function shouldRunSelfUpdate(workspaceRoot, force) {
@@ -4513,13 +4600,17 @@ async function runConnectorSetupSteps({
   if (selected.includes('asc')) {
     while (true) {
       clearTerminal();
-      await guideAscConnector(rl, secrets);
-      const check = await runImmediateConnectorHealthCheck({
+      const ascSetup = await guideAscConnector(rl, secrets);
+      let bootstrapEnv = ascSetup?.bootstrapEnv || {};
+      let check = await runImmediateConnectorHealthCheck({
         rl,
         configPath: args.config,
         connector: 'asc',
         secrets,
+        runtimeEnv: bootstrapEnv,
       });
+
+      await cleanupTemporaryAscBootstrapPrivateKey(bootstrapEnv);
       if (!check.retry) break;
     }
   }

@@ -439,7 +439,7 @@ async function checkAscAnalyticsReadiness(timeoutMs) {
   if (appsWithRequests.length === 0) {
     return {
       status: 'blocked',
-      detail: `ASC App Analytics has no report requests for ${results.length} checked app(s); run setup with an Admin key so Growth Engineer can create ongoing Analytics Report Requests`,
+      detail: `ASC App Analytics has no report requests for ${results.length} checked app(s); create the initial ongoing Analytics Report Requests once with a temporary Admin key, then run steady-state ingestion with Sales and Reports or Finance`,
       vendorNumber,
       appCount: appIds.length,
       checkedAppCount: results.length,
