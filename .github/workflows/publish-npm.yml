@@ -1,6 +1,11 @@
 name: Publish Growth Engineer to npm
 
 on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'package.json'
   workflow_dispatch:
 
 jobs:
