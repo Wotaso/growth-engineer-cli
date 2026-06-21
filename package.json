@@ -6,12 +6,11 @@
   "type": "module",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/Wotaso/analyticscli-monorepo.git",
-    "directory": "packages/growth-engineer"
+    "url": "git+https://github.com/Wotaso/growth-engineer-cli.git"
   },
-  "homepage": "https://github.com/Wotaso/analyticscli-monorepo/tree/main/packages/growth-engineer#readme",
+  "homepage": "https://github.com/Wotaso/growth-engineer-cli#readme",
   "bugs": {
-    "url": "https://github.com/Wotaso/analyticscli-monorepo/issues"
+    "url": "https://github.com/Wotaso/growth-engineer-cli/issues"
   },
   "files": [
     "dist",
