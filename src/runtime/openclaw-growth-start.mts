@@ -452,6 +452,19 @@ function runShellCommand(
   });
 }
 
+function ascIsolatedEnv(overrides: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {
+    ASC_BYPASS_KEYCHAIN: '1',
+    ...overrides,
+  };
+  const hasPrivateKeyPath = normalizeString(env.ASC_PRIVATE_KEY_PATH || process.env.ASC_PRIVATE_KEY_PATH);
+  if (hasPrivateKeyPath) {
+    if (!Object.prototype.hasOwnProperty.call(overrides, 'ASC_PRIVATE_KEY')) env.ASC_PRIVATE_KEY = '';
+    if (!Object.prototype.hasOwnProperty.call(overrides, 'ASC_PRIVATE_KEY_B64')) env.ASC_PRIVATE_KEY_B64 = '';
+  }
+  return env;
+}
+
 async function fileExists(filePath) {
   try {
     await fs.access(filePath);
@@ -1754,7 +1767,7 @@ function extractAscAppChoices(payload) {
 }
 
 async function listAscApps() {
-  const result = await runShellCommand('asc apps list --output json', 60_000);
+  const result = await runShellCommand('asc apps list --output json', 60_000, { env: ascIsolatedEnv() });
   if (!result.ok) {
     return {
       ok: false,
@@ -1838,9 +1851,18 @@ function extractAscAnalyticsRequestId(payload) {
 
 async function listAscAnalyticsRequests(appId, state = '') {
   const stateArg = state ? ` --state ${quote(state)}` : '';
-  const result = await runShellCommand(`asc analytics requests --app ${quote(appId)}${stateArg} --output json`, 60_000);
+  const result = await runShellCommand(`asc analytics requests --app ${quote(appId)}${stateArg} --output json`, 60_000, {
+    env: ascIsolatedEnv(),
+  });
   if (!result.ok) {
-    return { ok: false, ids: [], error: result.stderr || `exit ${result.code}` };
+    const error = result.stderr || `exit ${result.code}`;
+    return {
+      ok: false,
+      ids: [],
+      error: isInvalidAscPrivateKeyError(error)
+        ? `ASC Reports key auth failed: the .p8 key could not be parsed. ${error}`
+        : error,
+    };
   }
   return { ok: true, ids: extractAscAnalyticsRequestIds(parseJsonFromStdout(result.stdout)), error: null };
 }
@@ -1916,22 +1938,35 @@ async function ensureAscAnalyticsRequest(appId) {
   const created = await runShellCommand(
     `asc analytics request --app ${quote(normalizedAppId)} --access-type ONGOING --output json`,
     60_000,
+    { env: ascIsolatedEnv() },
   );
   let finalCreated = created;
   let usedBootstrapAdmin = false;
+  let attemptedBootstrapAdmin = false;
   if (!created.ok) {
     const bootstrapEnv = getAscBootstrapAdminEnv();
     if (bootstrapEnv) {
+      attemptedBootstrapAdmin = true;
       finalCreated = await runShellCommand(
         `asc analytics request --app ${quote(normalizedAppId)} --access-type ONGOING --output json`,
         60_000,
-        { env: bootstrapEnv },
+        { env: ascIsolatedEnv(bootstrapEnv) },
       );
       usedBootstrapAdmin = finalCreated.ok;
     }
   }
   if (!finalCreated.ok) {
-    return { ok: false, status: 'create_failed', requestId: null, error: finalCreated.stderr || `exit ${finalCreated.code}` };
+    const error = finalCreated.stderr || `exit ${finalCreated.code}`;
+    return {
+      ok: false,
+      status: 'create_failed',
+      requestId: null,
+      error: isInvalidAscPrivateKeyError(error)
+        ? attemptedBootstrapAdmin
+          ? `ASC Setup Admin key auth failed: the .p8 key could not be parsed. ${error}`
+          : `ASC Reports key auth failed: the .p8 key could not be parsed. ${error}`
+        : error,
+    };
   }
 
   const requestId = extractAscAnalyticsRequestId(parseJsonFromStdout(finalCreated.stdout));
@@ -2124,14 +2159,14 @@ function isInvalidAscPrivateKeyError(error) {
 
 function describeAscAppSetupFailure(error) {
   if (isInvalidAscPrivateKeyError(error)) {
-    return 'ASC auth failed: the .p8 key could not be parsed.';
+    return 'ASC Reports key auth failed: the .p8 key could not be parsed.';
   }
   return `Could not list App Store Connect apps (${error || 'unknown error'})`;
 }
 
 function remediateAscAppSetupFailure(error) {
   if (isInvalidAscPrivateKeyError(error)) {
-    return 'Rerun ASC setup and choose the original downloaded AuthKey_<KEY_ID>.p8 file for the Reports key. The wizard removes old pasted ASC_PRIVATE_KEY values when a file path is used.';
+    return 'Use the original downloaded AuthKey_<KEY_ID>.p8 file for the Reports key. The wizard now bypasses old asc keychain credentials during setup.';
   }
   return 'Verify ASC credentials, key role access, and `asc apps list --output json`.';
 }

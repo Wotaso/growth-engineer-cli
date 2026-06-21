@@ -2289,6 +2289,12 @@ function getPassingConnectorKeys(payload, failedConnectors = new Set()) {
 
 function summarizeFailureReason(detail) {
   const text = String(detail || '').replace(/\s+/g, ' ').trim();
+  if (/ASC Reports key auth failed: .*\.p8 key could not be parsed/i.test(text)) {
+    return 'ASC Reports key auth failed: the .p8 key could not be parsed';
+  }
+  if (/ASC Setup Admin key auth failed: .*\.p8 key could not be parsed/i.test(text)) {
+    return 'ASC Setup Admin key auth failed: the .p8 key could not be parsed';
+  }
   if (/ASC .*\.p8 private key is invalid|invalid private key|failed to parse|sequence truncated|malformed|asn1/i.test(text)) {
     return 'ASC auth failed: the .p8 key could not be parsed';
   }
@@ -2330,6 +2336,12 @@ function summarizeFailureFix(connector, blockers) {
     return 'Paste a Coolify base URL and read-only API token from Keys & Tokens / API tokens, then rerun setup.';
   }
   if (connector === 'asc') {
+    if (/Reports key auth failed|Reports key/i.test(combined) && /private key|could not be parsed|failed to parse|asn1/i.test(combined)) {
+      return 'Use the original downloaded AuthKey_<KEY_ID>.p8 file for the Reports key. The wizard bypasses old asc keychain credentials during setup.';
+    }
+    if (/Setup Admin key auth failed|Admin key/i.test(combined) && /private key|could not be parsed|failed to parse|asn1/i.test(combined)) {
+      return 'Use the original downloaded AuthKey_<KEY_ID>.p8 file for the Setup Admin key. This key is temporary and should have the Admin role.';
+    }
     if (/invalid|truncated|malformed|private key|could not be parsed|failed to parse|asn1/i.test(combined)) {
       return 'Use the original downloaded AuthKey_<KEY_ID>.p8 for the Reports key. Old pasted ASC_PRIVATE_KEY values are removed when you choose a file path.';
     }
@@ -2733,7 +2745,11 @@ async function runImmediateConnectorHealthCheck({
   }
   await saveSecretsImmediately(secrets);
 
-  const env = mergeRuntimeEnv(secrets, runtimeEnv);
+  const env = mergeRuntimeEnv(
+    secrets,
+    connector === 'asc' ? { ASC_BYPASS_KEYCHAIN: '1' } : {},
+    runtimeEnv,
+  );
   const command = `${nodeRuntimeScriptCommand('openclaw-growth-start.mjs')} --config ${quote(configPath)} --setup-only --connectors ${quote(connector)} --only-connectors ${quote(connector)}`;
   let result = await runSetupCommandWithProgress(
     command,
@@ -4681,7 +4697,10 @@ async function runConnectorSetupSteps({
     process.stdout.write(`Configured Coolify monitoring for ${coolifyConfig.baseUrl} in ${args.config}.\n`);
   }
 
-  const env = mergeRuntimeEnv(secrets);
+  const env = mergeRuntimeEnv(
+    secrets,
+    selected.includes('asc') ? { ASC_BYPASS_KEYCHAIN: '1' } : {},
+  );
   const command = `${nodeRuntimeScriptCommand('openclaw-growth-start.mjs')} --config ${quote(args.config)} --setup-only --connectors ${quote(selected.join(','))} --only-connectors ${quote(selected.join(','))}`;
   let setupResult = await runSetupCommandWithProgress(command, env, selected, 'Testing connector setup...');
   let setupPayload = parseJsonFromStdout(setupResult.stdout);
