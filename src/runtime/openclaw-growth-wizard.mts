@@ -2238,11 +2238,54 @@ function parseJsonFromStdout(stdout) {
   const firstBracket = raw.indexOf('[');
   const starts = [firstBrace, firstBracket].filter((index) => index >= 0);
   if (starts.length === 0) return null;
+  const start = Math.min(...starts);
+  const jsonText = extractFirstJsonValue(raw, start);
+  if (!jsonText) return null;
   try {
-    return JSON.parse(raw.slice(Math.min(...starts)));
+    return JSON.parse(jsonText);
   } catch {
     return null;
   }
+}
+
+function extractFirstJsonValue(raw, start) {
+  const open = raw[start];
+  const close = open === '{' ? '}' : open === '[' ? ']' : '';
+  if (!close) return '';
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let index = start; index < raw.length; index += 1) {
+    const char = raw[index];
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (char === '\\') {
+        escaped = true;
+      } else if (char === '"') {
+        inString = false;
+      }
+      continue;
+    }
+    if (char === '"') {
+      inString = true;
+      continue;
+    }
+    if (char === open) depth += 1;
+    if (char === close) {
+      depth -= 1;
+      if (depth === 0) return raw.slice(start, index + 1);
+    }
+  }
+  return '';
+}
+
+function stripProgressOutput(value) {
+  return String(value || '')
+    .split(/\r?\n/)
+    .filter((line) => !line.startsWith('OPENCLAW_PROGRESS '))
+    .join('\n')
+    .trim();
 }
 
 function clearTerminal() {
@@ -2475,11 +2518,10 @@ function printSetupFailure({ result, payload, command }) {
 
   const reason = result.code === null ? 'setup command did not report an exit code' : `setup command exited with code ${result.code}`;
   process.stdout.write(`Reason: ${reason}.\n`);
-  const output = truncate(result.stderr || result.stdout);
+  const output = truncate(stripProgressOutput(result.stderr) || stripProgressOutput(result.stdout));
   if (output) {
     process.stdout.write(`Details: ${output}\n`);
   }
-  process.stdout.write(`Run manually for full output: ${command}\n`);
 }
 
 function printSetupSuccess(payload) {
