@@ -2124,14 +2124,14 @@ function isInvalidAscPrivateKeyError(error) {
 
 function describeAscAppSetupFailure(error) {
   if (isInvalidAscPrivateKeyError(error)) {
-    return 'Stored ASC .p8 private key is invalid or truncated. The connector wizard must reject this before saving; rerun the updated wizard and paste the full .p8 file content from BEGIN PRIVATE KEY to END PRIVATE KEY.';
+    return 'ASC .p8 file is invalid or truncated.';
   }
   return `Could not list App Store Connect apps (${error || 'unknown error'})`;
 }
 
 function remediateAscAppSetupFailure(error) {
   if (isInvalidAscPrivateKeyError(error)) {
-    return 'Rerun the updated connector wizard and paste the full downloaded .p8 file content. The wizard validates it before saving ASC_PRIVATE_KEY_PATH.';
+    return 'Rerun ASC setup and choose the original valid AuthKey_<KEY_ID>.p8 file, or paste the full key content from BEGIN PRIVATE KEY to END PRIVATE KEY.';
   }
   return 'Verify ASC credentials, key role access, and `asc apps list --output json`.';
 }

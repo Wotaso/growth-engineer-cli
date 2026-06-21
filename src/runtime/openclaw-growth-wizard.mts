@@ -2288,6 +2288,9 @@ function getPassingConnectorKeys(payload, failedConnectors = new Set()) {
 
 function summarizeFailureReason(detail) {
   const text = String(detail || '').replace(/\s+/g, ' ').trim();
+  if (/ASC .*\.p8 private key is invalid|invalid or truncated|sequence truncated|malformed/i.test(text)) {
+    return 'ASC .p8 file is invalid or truncated';
+  }
   if (/token has been revoked/i.test(text)) return 'token has been revoked';
   if (/unauthorized|UNAUTHORIZED/i.test(text)) return 'token is unauthorized';
   if (/Sentry API 404|Not Found/i.test(text)) return 'API returned 404 Not Found';
@@ -2326,6 +2329,9 @@ function summarizeFailureFix(connector, blockers) {
     return 'Paste a Coolify base URL and read-only API token from Keys & Tokens / API tokens, then rerun setup.';
   }
   if (connector === 'asc') {
+    if (/invalid|truncated|malformed|private key/i.test(combined)) {
+      return 'Choose the original valid AuthKey_<KEY_ID>.p8 file, or paste the full key content from BEGIN PRIVATE KEY to END PRIVATE KEY.';
+    }
     return 'Rerun ASC setup and verify ASC credentials, key role access, and `asc apps list --output json`.';
   }
   if (isAccountSignalConnector(connector)) {
@@ -2377,24 +2383,16 @@ function printConciseSetupBlockers(payload, command, options: Record<string, any
   }
 
   if (groups.size > 0) {
-    process.stdout.write('\nNeeds fix:\n');
+    process.stdout.write('\nNeeds attention:\n');
     for (const [connector, connectorBlockers] of groups.entries()) {
       const primary = connectorBlockers[0] || {};
-      const reasons = [
-        ...new Set(
-          connectorBlockers
-            .map((blocker) => summarizeFailureReason(blocker.detail || blocker.check))
-            .filter(Boolean),
-        ),
-      ];
       process.stdout.write(`- ${connectorTitle(connector)}: ${summarizeFailureReason(primary.detail || primary.check)}\n`);
-      process.stdout.write(`  Why: ${reasons.join('; ')}.\n`);
       process.stdout.write(`  Fix: ${summarizeFailureFix(connector, connectorBlockers)}\n`);
     }
   }
 
   printDeferredSetupNotes(blockers, focusConnectors);
-  if (groups.size > 0 || !options.hideRerunWhenClean) {
+  if (!options.hideRerun && (groups.size > 0 || !options.hideRerunWhenClean)) {
     process.stdout.write(`\nRerun: ${command}\n`);
   }
 }
@@ -2540,24 +2538,32 @@ function isDeferredGitHubFailure(failure) {
   );
 }
 
-function healthStatusLabel(status) {
-  if (status === 'running') return 'running';
+function healthStatusLabel(status, spinner = '') {
+  if (status === 'running') return spinner ? `running ${spinner}` : 'running';
   if (status === 'pass') return 'done';
   if (status === 'warn') return 'needs attention';
   if (status === 'fail') return 'needs attention';
   if (status === 'deferred') return 'deferred';
-  return 'pending';
+  return spinner ? `pending ${spinner}` : 'pending';
 }
 
-function renderHealthProgress(items, message = 'Live checks running...', title = 'Health check') {
+function renderHealthProgress(items, message = 'Live checks running...', title = 'Health check', options: Record<string, any> = {}) {
   if (process.stdout.isTTY) clearTerminal();
-  const finished = items.filter((item) => !['pending', 'running'].includes(String(item.status || ''))).length;
+  const final = Boolean(options.final);
+  const visibleItems = final
+    ? items.filter((item) => !['pending', 'running'].includes(String(item.status || '')) && item.key !== 'finalize')
+    : items;
+  const finished = visibleItems.filter((item) => !['pending', 'running'].includes(String(item.status || ''))).length;
   process.stdout.write(`${title}\n`);
   process.stdout.write('------------\n');
   process.stdout.write(`${message}\n\n`);
-  process.stdout.write(`${finished}/${items.length} checks finished.\n\n`);
-  for (const item of items) {
-    process.stdout.write(`[${healthStatusLabel(item.status)}] ${item.label}: ${item.detail}\n`);
+  if (final) {
+    process.stdout.write('Checks complete.\n\n');
+  } else {
+    process.stdout.write(`${finished}/${visibleItems.length} checks finished.\n\n`);
+  }
+  for (const item of visibleItems) {
+    process.stdout.write(`[${healthStatusLabel(item.status, options.spinner || '')}] ${item.label}: ${item.detail}\n`);
   }
 }
 
@@ -2665,22 +2671,33 @@ function updateProgressItem(items, key, status, detail) {
 
 async function runSetupCommandWithProgress(command, env, selected: ConnectorKey[], message) {
   const plan = buildSetupTestProgressPlan(selected);
-  renderHealthProgress(plan, `${message}\nDo not close this terminal yet.`, 'Connector setup test');
+  const spinnerFrames = ['-', '\\', '|', '/'];
+  let spinnerIndex = 0;
+  let currentMessage = message;
+  const render = (nextMessage = currentMessage, options: Record<string, any> = {}) => {
+    currentMessage = nextMessage;
+    renderHealthProgress(plan, currentMessage, 'Connector setup test', {
+      ...options,
+      spinner: spinnerFrames[spinnerIndex++ % spinnerFrames.length],
+    });
+  };
+  render(message);
+  const spinnerInterval = process.stdout.isTTY
+    ? setInterval(() => render(currentMessage), 800)
+    : null;
   const progressCommand = command.includes('--progress-json') ? command : `${command} --progress-json`;
   const result = await runCommandCaptureWithProgress(progressCommand, (event) => {
-    if (updateHealthProgress(plan, event)) {
-      const primaryFinished = primaryProgressItemsFinished(plan);
-      if (primaryFinished) {
-        updateProgressItem(plan, 'finalize', 'running', 'command still running; parsing final output and follow-up work');
-      }
-      const message = primaryFinished
-        ? 'Checks finished. Finalizing result; do not close this terminal yet.'
-        : 'Connector setup test is still running. Do not close this terminal yet.';
-      renderHealthProgress(plan, message, 'Connector setup test');
+    if (!updateHealthProgress(plan, event)) return;
+    const primaryFinished = primaryProgressItemsFinished(plan);
+    if (primaryFinished) {
+      updateProgressItem(plan, 'finalize', 'running', 'finishing');
     }
-  }, { env, timeoutMs: 180_000 });
+    render(primaryFinished ? 'Finishing setup test...' : 'Testing connector setup...');
+  }, { env, timeoutMs: 180_000 }).finally(() => {
+    if (spinnerInterval) clearInterval(spinnerInterval);
+  });
   updateProgressItem(plan, 'finalize', 'pass', 'result received');
-  renderHealthProgress(plan, 'Connector setup test finished.', 'Connector setup test');
+  renderHealthProgress(plan, 'Connector setup test finished.', 'Connector setup test', { final: true });
   return result;
 }
 
@@ -2729,6 +2746,7 @@ async function runImmediateConnectorHealthCheck({
     printConciseSetupBlockers(payload, command, {
       focusConnectors: [connector],
       hideRerunWhenClean: true,
+      hideRerun: true,
     });
     const retry = await askYesNo(rl, `Re-enter ${connectorLabel(connector)} configuration now?`, true);
     return { ok: false, retry, result, payload };
@@ -4209,7 +4227,7 @@ async function guideAscConnector(rl, secrets: Record<string, string>) {
   process.stdout.write(`${bold('Enter the Reports key now:')}\n`);
   printBullets([
     `${bold('.p8 path')} to Apple\'s original ${bold('AuthKey_<KEY_ID>.p8')} file. ${bold('Do not rename it')}; KEY_ID is read from the filename.`,
-    `${bold('Issuer ID')} from the API keys page.`,
+    `${bold('Issuer ID')} from the API keys page. Same value for both keys.`,
     `${bold('Vendor Number')} from Sales and Trends > Reports.`,
   ]);
 
@@ -4224,7 +4242,7 @@ async function guideAscConnector(rl, secrets: Record<string, string>) {
     secrets.ASC_KEY_ID = keyId;
     process.stdout.write(`Inferred ASC_KEY_ID=${keyId} from ${path.basename(normalKeyPath.privateKeyPath)}.\n`);
   }
-  const issuerId = await ask(rl, 'ASC_ISSUER_ID (reports key, empty = skip)', process.env.ASC_ISSUER_ID || '');
+  const issuerId = await ask(rl, 'ASC_ISSUER_ID (same for both keys, empty = skip)', process.env.ASC_ISSUER_ID || '');
   if (issuerId.trim()) secrets.ASC_ISSUER_ID = issuerId.trim();
 
   if (!normalKeyPath.privateKeyPath) {
@@ -4267,7 +4285,10 @@ async function guideAscBootstrapAdminKey(rl, issuerIdDefault = '') {
     keyLabel: 'the temporary Admin key',
   });
   let bootstrapKeyId = bootstrapKeyPath.keyId;
-  const bootstrapIssuerId = await ask(rl, 'ASC_BOOTSTRAP_ISSUER_ID', issuerIdDefault);
+  let bootstrapIssuerId = String(issuerIdDefault || '').trim();
+  if (!bootstrapIssuerId) {
+    bootstrapIssuerId = await ask(rl, 'ASC_ISSUER_ID (same API keys page)', process.env.ASC_ISSUER_ID || '');
+  }
   if (bootstrapKeyPath.privateKeyPath) {
     bootstrapEnv.ASC_BOOTSTRAP_PRIVATE_KEY_PATH = bootstrapKeyPath.privateKeyPath;
     process.stdout.write(`Inferred ASC_BOOTSTRAP_KEY_ID=${bootstrapKeyId} from ${path.basename(bootstrapKeyPath.privateKeyPath)}.\n`);
