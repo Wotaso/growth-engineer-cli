@@ -392,15 +392,19 @@ function runShellCommand(
   options: { env?: NodeJS.ProcessEnv; onStderrLine?: (line: string) => void } = {},
 ): Promise<ShellResult> {
   return new Promise((resolve) => {
+    const childEnv = {
+      ...process.env,
+      DEBIAN_FRONTEND: 'noninteractive',
+      SUDO_ASKPASS: '/bin/false',
+      SUDO_PROMPT: '',
+    };
+    for (const [key, value] of Object.entries(options.env || {})) {
+      if (value === undefined) delete childEnv[key];
+      else childEnv[key] = value;
+    }
     const child = spawn(resolveShellCommand(), ['-c', hardenUnattendedShellCommand(command)], {
       stdio: ['ignore', 'pipe', 'pipe'],
-      env: {
-        ...process.env,
-        ...(options.env || {}),
-        DEBIAN_FRONTEND: 'noninteractive',
-        SUDO_ASKPASS: '/bin/false',
-        SUDO_PROMPT: '',
-      },
+      env: childEnv,
     });
 
     let stdout = '';
@@ -459,8 +463,8 @@ function ascIsolatedEnv(overrides: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
   };
   const hasPrivateKeyPath = normalizeString(env.ASC_PRIVATE_KEY_PATH || process.env.ASC_PRIVATE_KEY_PATH);
   if (hasPrivateKeyPath) {
-    if (!Object.prototype.hasOwnProperty.call(overrides, 'ASC_PRIVATE_KEY')) env.ASC_PRIVATE_KEY = '';
-    if (!Object.prototype.hasOwnProperty.call(overrides, 'ASC_PRIVATE_KEY_B64')) env.ASC_PRIVATE_KEY_B64 = '';
+    if (!Object.prototype.hasOwnProperty.call(overrides, 'ASC_PRIVATE_KEY')) env.ASC_PRIVATE_KEY = undefined;
+    if (!Object.prototype.hasOwnProperty.call(overrides, 'ASC_PRIVATE_KEY_B64')) env.ASC_PRIVATE_KEY_B64 = undefined;
   }
   return env;
 }
