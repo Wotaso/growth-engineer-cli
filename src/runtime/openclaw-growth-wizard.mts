@@ -3786,11 +3786,9 @@ function bold(text: string) {
 
 async function guideGitHubConnector(rl, secrets: Record<string, string>) {
   printSection('GitHub code access', [
-    'Use this when OpenClaw should read repo context or create GitHub delivery artifacts.',
-  ]);
-  printBullets([
-    'Open the token page, select the scopes you want, then paste the token here.',
-    'You can rerun this wizard later to change GitHub permissions.',
+    `${bold('Create token')} here: https://github.com/settings/tokens/new`,
+    `${bold('Scopes')}: public repos = public_repo, private repos/issues/PRs = repo.`,
+    `${bold('Only add workflow')} if OpenClaw should edit GitHub Actions files.`,
   ]);
 
   let hasGh = await commandExists('gh');
@@ -3800,16 +3798,6 @@ async function guideGitHubConnector(rl, secrets: Record<string, string>) {
   if (hasGh) {
     process.stdout.write('GitHub CLI is available for helper commands.\n\n');
   }
-
-  process.stdout.write('Token URL: https://github.com/settings/tokens/new\n\n');
-  process.stdout.write(`${ANSI.bold}Suggested scopes${ANSI.reset}\n`);
-  printBullets([
-    'Public repo only: select `public_repo`.',
-    'Private repo access: select `repo` (classic GitHub tokens make private repo access broad).',
-    'Create issues / draft PRs in private repos: `repo` is the relevant classic-token scope.',
-    'Edit GitHub Actions workflow files: add `workflow` only if you explicitly want this.',
-    'Usually do not select: packages, admin:org, hooks, gist, user, delete_repo, enterprise, codespace, copilot.',
-  ]);
 
   const token = await maybePromptSecret(rl, 'Paste GITHUB_TOKEN into this local terminal', 'GITHUB_TOKEN');
   if (token) secrets.GITHUB_TOKEN = token;
@@ -3831,12 +3819,10 @@ function shouldForceFreshAnalyticsToken(healthByConnector: Record<string, any> =
 }
 
 async function guideAnalyticsConnector(rl, secrets: Record<string, string>, options: Record<string, any> = {}) {
-  printSection('AnalyticsCLI');
-  process.stdout.write('Create a readonly CLI token:\n');
-  process.stdout.write('1. Open https://dash.analyticscli.com/\n');
-  process.stdout.write('2. Account -> API Keys\n');
-  process.stdout.write('3. Create Access Token\n');
-  process.stdout.write('4. Copy the Readonly CLI Token and paste it below\n\n');
+  printSection('AnalyticsCLI', [
+    `${bold('Create readonly CLI token')}: https://dash.analyticscli.com/`,
+    `${bold('Path')}: Account -> API Keys -> Create Access Token.`,
+  ]);
   const forceFresh = Boolean(options.forceFresh);
   if (forceFresh && process.env.ANALYTICSCLI_ACCESS_TOKEN) {
     process.stdout.write('Stored token failed. Paste a new token.\n\n');
@@ -3857,17 +3843,9 @@ async function guideAnalyticsConnector(rl, secrets: Record<string, string>, opti
 
 async function guideRevenueCatConnector(rl, secrets: Record<string, string>) {
   printSection('RevenueCat monetization data', [
-    'Use this when OpenClaw should read subscription, product, entitlement, and revenue context.',
-  ]);
-  process.stdout.write('\nCreate a RevenueCat secret API key here:\n  https://app.revenuecat.com/\n\n');
-  printBullets([
-    'Select your app.',
-    'In the sidebar, choose "Apps & providers".',
-    'Click "API keys" and generate a new secret API key.',
-    'Name it "analyticscli" and choose API version 2.',
-    'Set Charts metrics permissions to read.',
-    'Set Customer information permissions to read.',
-    'Set Project configuration permissions to read.',
+    `${bold('Create secret API key')}: https://app.revenuecat.com/`,
+    `${bold('Path')}: Apps & providers -> API keys -> New secret key.`,
+    `${bold('Permissions')}: API v2, read for Charts metrics, Customer information, Project configuration.`,
   ]);
   const apiKey = await maybePromptSecret(rl, 'Paste REVENUECAT_API_KEY into this local terminal', 'REVENUECAT_API_KEY');
   if (apiKey) secrets.REVENUECAT_API_KEY = apiKey;
@@ -3891,17 +3869,9 @@ function paddleTokenEnvForAccount(index, label) {
 
 async function guidePaddleConnector(rl, secrets: Record<string, string>) {
   printSection('Paddle Billing metrics', [
-    'Use this when OpenClaw should read web checkout, revenue, MRR, refunds, chargebacks, and active subscriber metrics.',
-  ]);
-  process.stdout.write('\nCreate or update a scoped Paddle API key here:\n  https://vendors.paddle.com/authentication-v2\n\n');
-  printBullets([
-    'Open Paddle > Developer Tools > Authentication.',
-    'Use the API keys tab and create a new live API key.',
-    'Minimum: grant `metrics.read` so account-level revenue, MRR, refunds, chargebacks, subscribers, and checkout conversion work.',
-    'Recommended for better Growth Engineer analysis: grant all available read-only permissions (`*.read`), including products, prices, discounts, customers, transactions, subscriptions, adjustments, reports, and notifications.',
-    'Do not grant any write permissions (`*.write`) unless another workflow explicitly needs them.',
-    'Do not select or hard-code a single product in the wizard; the Growth Engineer should keep account-level metrics context.',
-    'Paste the key here so it is stored only in the local chmod 600 secrets file.',
+    `${bold('Create live API key')}: https://vendors.paddle.com/authentication-v2`,
+    `${bold('Minimum')}: metrics.read. Better: all read-only *.read scopes.`,
+    `${bold('Do not grant write scopes')} unless you explicitly need them elsewhere.`,
   ]);
   const accounts = [];
   let index = 0;
@@ -3926,17 +3896,10 @@ async function guidePaddleConnector(rl, secrets: Record<string, string>) {
 
 async function guideSeoConnector(rl, secrets: Record<string, string>) {
   printSection('SEO / Google Search Console / DataForSEO', [
-    'Use this when OpenClaw should read organic search demand, GSC clicks/impressions/CTR/position, and optional paid keyword ideas.',
-  ]);
-  process.stdout.write('\nGoogle Search Console:\n  https://search.google.com/search-console\nGoogle Cloud service accounts:\n  https://console.cloud.google.com/iam-admin/serviceaccounts\nDataForSEO API dashboard:\n  https://app.dataforseo.com/api-dashboard\n\n');
-  printBullets([
-    'Preferred: give the token/service account access to all Search Console properties you want analyzed.',
-    'Leave the property URL empty to let the exporter list and query all verified GSC properties in the account.',
-    'Enter a property URL only when you intentionally want to restrict analysis to one site.',
-    'For OAuth token mode, paste a read-only Search Console token with `webmasters.readonly` scope.',
-    'For service-account mode, add the service account email as a restricted/full user in Search Console, then set GOOGLE_APPLICATION_CREDENTIALS or GSC_SERVICE_ACCOUNT_JSON outside this wizard.',
-    'DataForSEO is optional and paid. The exporter refuses paid calls unless the source command includes --confirm-paid and a small --max-paid-requests cap.',
-    'CSV-only mode is also supported with --gsc-csv or --csv in sources.seo.command.',
+    `${bold('GSC')}: https://search.google.com/search-console`,
+    `${bold('Service account')}: https://console.cloud.google.com/iam-admin/serviceaccounts`,
+    `${bold('Optional paid keyword data')}: https://app.dataforseo.com/api-dashboard`,
+    `${bold('Default')}: leave property URL empty to use all verified GSC properties.`,
   ]);
   const siteUrl = await ask(rl, 'Optional GSC property URL (empty = all verified properties)', process.env.GSC_SITE_URL || '');
   if (siteUrl.trim()) secrets.GSC_SITE_URL = siteUrl.trim();
@@ -4038,11 +4001,10 @@ async function guideAccountSignalConnector(rl, secrets: Record<string, string>, 
   const definition = getAccountSignalConnectorDefinition(key);
   if (!definition) return [];
   printSection(definition.label, [
-    definition.summary,
-    'Setup is account-wide. Do not paste project IDs, app IDs, product IDs, package names, paywall IDs, service names, or tags here.',
+    `${bold('Docs')}: ${definition.docsUrl}`,
+    `${bold('Setup is account-wide')}. Do not paste project IDs, app IDs, product IDs, package names, paywall IDs, service names, or tags here.`,
+    `${bold('Paste only credentials')} below. The agent discovers accounts/apps/projects later.`,
   ]);
-  process.stdout.write(`Docs: ${definition.docsUrl}\n\n`);
-  printBullets(definition.steps);
 
   const accounts = [];
   let index = 0;
@@ -4089,8 +4051,8 @@ async function guideAccountSignalConnector(rl, secrets: Record<string, string>, 
 
 async function guideSentryConnector(rl, secrets: Record<string, string>) {
   printSection('Sentry / GlitchTip', [
-    'Paste token, org, and base URL. Projects are discovered automatically.',
-    'Use `https://sentry.io` for Sentry Cloud or your GlitchTip/self-hosted base URL.',
+    `${bold('Base URL')}: https://sentry.io for Sentry Cloud, otherwise your GlitchTip/self-hosted URL.`,
+    `${bold('Token + org')} are needed. Project scope remains unpinned.`,
   ]);
 
   const accounts = [];
@@ -4162,7 +4124,7 @@ async function guideSentryConnector(rl, secrets: Record<string, string>) {
       if (discovery.ok && discovery.projects.length > 0) {
         verifiedVisibleProjects = true;
         process.stdout.write(
-          `Found ${discovery.projects.length} visible project(s). Project scope remains unpinned so OpenClaw/Hermes can decide per run.\n`,
+          `Found ${discovery.projects.length} visible project(s). Project scope remains unpinned.\n`,
         );
       } else {
         const fallbackOrgs = discoveredOrganizations
@@ -4224,21 +4186,14 @@ function normalizeCoolifyBaseUrl(value) {
 
 async function guideCoolifyConnector(rl, secrets: Record<string, string>) {
   printSection('Coolify deployment monitoring', [
-    'Use this when OpenClaw should read deployment, resource, server, and health-check signals from Coolify.',
-    'The token should be read-only. Do not use "*" or sensitive-token permissions for normal monitoring.',
+    `${bold('Create read-only API token')} in Coolify.`,
+    `${bold('Do not use * or sensitive-token permissions')} for normal monitoring.`,
   ]);
   const baseUrl = normalizeCoolifyBaseUrl(
     await ask(rl, 'Coolify base URL', process.env.COOLIFY_BASE_URL || 'https://coolify.wotaso.com'),
   );
   const tokenUrl = baseUrl ? `${baseUrl}/security/api-tokens` : 'https://<your-coolify-host>/security/api-tokens';
-  process.stdout.write(`\nToken page: ${tokenUrl}\n\n`);
-  printBullets([
-    'Open the Coolify dashboard.',
-    'In the sidebar, go to "Keys & Tokens".',
-    'Open "API tokens".',
-    'Create a new API key/token with read-only permissions.',
-    'Copy the token once and paste it into this local terminal.',
-  ]);
+  process.stdout.write(`${bold('Token page')}: ${tokenUrl}\n\n`);
   const token = await maybePromptSecret(rl, 'Paste COOLIFY_API_TOKEN into this local terminal', 'COOLIFY_API_TOKEN');
   if (baseUrl) secrets.COOLIFY_BASE_URL = baseUrl;
   if (token) secrets.COOLIFY_API_TOKEN = token;
