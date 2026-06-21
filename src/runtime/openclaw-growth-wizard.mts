@@ -2884,6 +2884,12 @@ function resolveAscPrivateKeyPath(keyId: string, suffix = '') {
   return path.join(baseDir, `AuthKey_${safeKeyId}${suffix}.p8`);
 }
 
+function inferAscKeyIdFromPrivateKeyPath(filePath) {
+  const fileName = path.basename(String(filePath || '').trim());
+  const match = fileName.match(/^AuthKey_([A-Za-z0-9]+)\.p8$/);
+  return match?.[1] || '';
+}
+
 function renderEnvValue(value) {
   return `"${String(value).replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\$/g, '\\$')}"`;
 }
@@ -3741,6 +3747,23 @@ async function askAscPrivateKeyPath(rl, options: { label?: string; defaultValue?
   }
 }
 
+async function askAscPrivateKeyPathWithKeyId(
+  rl,
+  options: { label?: string; defaultValue?: string; keyLabel?: string } = {},
+) {
+  const keyLabel = options.keyLabel || 'App Store Connect key';
+  while (true) {
+    const privateKeyPath = await askAscPrivateKeyPath(rl, options);
+    if (!privateKeyPath) return { privateKeyPath: '', keyId: '' };
+
+    const keyId = inferAscKeyIdFromPrivateKeyPath(privateKeyPath);
+    if (keyId) return { privateKeyPath, keyId };
+
+    process.stdout.write(`Could not infer Key ID for ${keyLabel} from the .p8 file name.\n`);
+    process.stdout.write('Use Apple\'s original downloaded file name: AuthKey_<KEY_ID>.p8. Do not rename the .p8 file.\n');
+  }
+}
+
 function printSection(title: string, lines: string[] = []) {
   process.stdout.write(`\n${ANSI.bold}${title}${ANSI.reset}\n`);
   process.stdout.write(`${'-'.repeat(title.length)}\n`);
@@ -4245,29 +4268,39 @@ async function guideAscConnector(rl, secrets: Record<string, string>) {
   process.stdout.write('\nNeeded values for the normal key now\n');
   printBullets([
     'Issuer ID: shown at the top of the API keys page.',
-    'Key ID: shown in the key row or in the file name AuthKey_<KEY_ID>.p8.',
-    '.p8 private key: download it once, open it, and paste the full file content.',
+    '.p8 file path: use Apple\'s original downloaded file name AuthKey_<KEY_ID>.p8.',
+    'Do not rename the .p8 file; the wizard reads ASC_KEY_ID from the file name.',
     'Vendor Number: App Store Connect > Sales and Trends > Reports.',
   ]);
 
-  const keyId = await ask(rl, 'ASC_KEY_ID for normal reporting key (leave empty to skip)', process.env.ASC_KEY_ID || '');
-  const issuerId = await ask(rl, 'ASC_ISSUER_ID for normal reporting key (leave empty to skip)', process.env.ASC_ISSUER_ID || '');
-  if (keyId.trim()) secrets.ASC_KEY_ID = keyId.trim();
-  if (issuerId.trim()) secrets.ASC_ISSUER_ID = issuerId.trim();
-
-  const privateKeyContent = await askAscPrivateKeyContent(rl, {
+  const normalKeyPath = await askAscPrivateKeyPathWithKeyId(rl, {
+    label: 'ASC_PRIVATE_KEY_PATH for normal reporting key (AuthKey_<KEY_ID>.p8 path, empty = paste content instead)',
+    defaultValue: process.env.ASC_PRIVATE_KEY_PATH || '',
     keyLabel: 'the normal reporting key',
   });
-  if (privateKeyContent) {
+  let keyId = normalKeyPath.keyId;
+  if (normalKeyPath.privateKeyPath) {
+    secrets.ASC_PRIVATE_KEY_PATH = normalKeyPath.privateKeyPath;
+    secrets.ASC_KEY_ID = keyId;
+    process.stdout.write(`Inferred ASC_KEY_ID=${keyId} from ${path.basename(normalKeyPath.privateKeyPath)}.\n`);
+  }
+  const issuerId = await ask(rl, 'ASC_ISSUER_ID for normal reporting key (leave empty to skip)', process.env.ASC_ISSUER_ID || '');
+  if (issuerId.trim()) secrets.ASC_ISSUER_ID = issuerId.trim();
+
+  if (!normalKeyPath.privateKeyPath) {
+    keyId = await ask(rl, 'ASC_KEY_ID for normal reporting key (from AuthKey_<KEY_ID>.p8, leave empty to skip)', process.env.ASC_KEY_ID || '');
+    if (keyId.trim()) secrets.ASC_KEY_ID = keyId.trim();
+    const privateKeyContent = await askAscPrivateKeyContent(rl, {
+      keyLabel: 'the normal reporting key',
+    });
+    if (!privateKeyContent) return await guideAscBootstrapAdminKey(rl, issuerId.trim());
+
     const privateKeyPath = resolveAscPrivateKeyPath(keyId);
     await fs.mkdir(path.dirname(privateKeyPath), { recursive: true, mode: 0o700 });
     await fs.writeFile(privateKeyPath, privateKeyContent, { encoding: 'utf8', mode: 0o600 });
     await fs.chmod(privateKeyPath, 0o600);
     secrets.ASC_PRIVATE_KEY_PATH = privateKeyPath;
     process.stdout.write(`Saved ASC private key to ${privateKeyPath} with chmod 600.\n`);
-  } else {
-    const privateKeyPath = await askAscPrivateKeyPath(rl);
-    if (privateKeyPath.trim()) secrets.ASC_PRIVATE_KEY_PATH = privateKeyPath.trim();
   }
 
   const vendorNumber = await ask(
@@ -4287,21 +4320,38 @@ async function guideAscBootstrapAdminKey(rl, issuerIdDefault = '') {
     'Use the second key you created with the Admin role.',
     'This is only needed to create the first App Analytics report request.',
     'The wizard does not save ASC_BOOTSTRAP_* to secrets.env.',
+    'Use Apple\'s original AuthKey_<KEY_ID>.p8 file name so the wizard can infer ASC_BOOTSTRAP_KEY_ID.',
+    'Do not rename the .p8 file.',
     'If you paste the .p8 content, the local temporary file is deleted after analytics initialization.',
     'Revoke this Admin key in App Store Connect after setup.',
   ]);
-  const bootstrapKeyId = await ask(rl, 'ASC_BOOTSTRAP_KEY_ID for temporary Admin key (required)', '');
+  const bootstrapKeyPath = await askAscPrivateKeyPathWithKeyId(rl, {
+    label: 'ASC_BOOTSTRAP_PRIVATE_KEY_PATH for temporary Admin key (AuthKey_<KEY_ID>.p8 path, empty = paste content instead)',
+    defaultValue: '',
+    keyLabel: 'the temporary Admin key',
+  });
+  let bootstrapKeyId = bootstrapKeyPath.keyId;
   const bootstrapIssuerId = await ask(rl, 'ASC_BOOTSTRAP_ISSUER_ID for temporary Admin key', issuerIdDefault);
+  if (bootstrapKeyPath.privateKeyPath) {
+    bootstrapEnv.ASC_BOOTSTRAP_PRIVATE_KEY_PATH = bootstrapKeyPath.privateKeyPath;
+    process.stdout.write(`Inferred ASC_BOOTSTRAP_KEY_ID=${bootstrapKeyId} from ${path.basename(bootstrapKeyPath.privateKeyPath)}.\n`);
+    const shouldDelete = await askYesNo(rl, 'Delete this temporary Admin .p8 file from this host after the setup check?', true);
+    if (shouldDelete) bootstrapEnv.ASC_BOOTSTRAP_PRIVATE_KEY_DELETE_AFTER_USE = '1';
+  } else {
+    bootstrapKeyId = await ask(rl, 'ASC_BOOTSTRAP_KEY_ID for temporary Admin key (from AuthKey_<KEY_ID>.p8, required)', '');
+  }
   if (!bootstrapKeyId.trim() || !bootstrapIssuerId.trim()) return { bootstrapEnv };
   bootstrapEnv.ASC_BOOTSTRAP_KEY_ID = bootstrapKeyId.trim();
   bootstrapEnv.ASC_BOOTSTRAP_ISSUER_ID = bootstrapIssuerId.trim();
 
-  const bootstrapPrivateKeyContent = await askAscPrivateKeyContent(rl, {
-    envName: 'ASC_BOOTSTRAP_PRIVATE_KEY',
-    persistLabel: 'ASC_BOOTSTRAP_PRIVATE_KEY_PATH temporarily',
-    keyLabel: 'the temporary Admin key',
-  });
-  if (bootstrapPrivateKeyContent) {
+  if (!bootstrapKeyPath.privateKeyPath) {
+    const bootstrapPrivateKeyContent = await askAscPrivateKeyContent(rl, {
+      envName: 'ASC_BOOTSTRAP_PRIVATE_KEY',
+      persistLabel: 'ASC_BOOTSTRAP_PRIVATE_KEY_PATH temporarily',
+      keyLabel: 'the temporary Admin key',
+    });
+    if (!bootstrapPrivateKeyContent) return { bootstrapEnv };
+
     const bootstrapPrivateKeyPath = resolveAscPrivateKeyPath(bootstrapKeyId, '_bootstrap_admin');
     await fs.mkdir(path.dirname(bootstrapPrivateKeyPath), { recursive: true, mode: 0o700 });
     await fs.writeFile(bootstrapPrivateKeyPath, bootstrapPrivateKeyContent, { encoding: 'utf8', mode: 0o600 });
@@ -4309,16 +4359,6 @@ async function guideAscBootstrapAdminKey(rl, issuerIdDefault = '') {
     bootstrapEnv.ASC_BOOTSTRAP_PRIVATE_KEY_PATH = bootstrapPrivateKeyPath;
     bootstrapEnv.ASC_BOOTSTRAP_PRIVATE_KEY_DELETE_AFTER_USE = '1';
     process.stdout.write(`Saved temporary Admin ASC private key to ${bootstrapPrivateKeyPath} with chmod 600. It will be deleted after the setup check.\n`);
-  } else {
-    const bootstrapPrivateKeyPath = await askAscPrivateKeyPath(rl, {
-      label: 'ASC_BOOTSTRAP_PRIVATE_KEY_PATH (temporary Admin AuthKey_XXXX.p8 path, leave empty to skip)',
-      defaultValue: '',
-    });
-    if (bootstrapPrivateKeyPath.trim()) {
-      bootstrapEnv.ASC_BOOTSTRAP_PRIVATE_KEY_PATH = bootstrapPrivateKeyPath.trim();
-      const shouldDelete = await askYesNo(rl, 'Delete this temporary Admin .p8 file from this host after the setup check?', true);
-      if (shouldDelete) bootstrapEnv.ASC_BOOTSTRAP_PRIVATE_KEY_DELETE_AFTER_USE = '1';
-    }
   }
   return { bootstrapEnv };
 }
