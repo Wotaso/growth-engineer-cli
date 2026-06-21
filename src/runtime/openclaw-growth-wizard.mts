@@ -2295,6 +2295,12 @@ function summarizeFailureReason(detail) {
   if (/ASC Setup Admin key auth failed: .*\.p8 key could not be parsed/i.test(text)) {
     return 'ASC Setup Admin key auth failed: the .p8 key could not be parsed';
   }
+  if (/ASC Reports key auth failed: .*\.p8 file permissions are too open/i.test(text)) {
+    return 'ASC Reports key auth failed: .p8 file permissions are too open';
+  }
+  if (/ASC Setup Admin key auth failed: .*\.p8 file permissions are too open/i.test(text)) {
+    return 'ASC Setup Admin key auth failed: .p8 file permissions are too open';
+  }
   if (/ASC .*\.p8 private key is invalid|invalid private key|failed to parse|sequence truncated|malformed|asn1/i.test(text)) {
     return 'ASC auth failed: the .p8 key could not be parsed';
   }
@@ -2336,8 +2342,11 @@ function summarizeFailureFix(connector, blockers) {
     return 'Paste a Coolify base URL and read-only API token from Keys & Tokens / API tokens, then rerun setup.';
   }
   if (connector === 'asc') {
+    if (/file permissions are too open|too permissive|chmod 600/i.test(combined)) {
+      return 'Rerun ASC setup. The wizard saves a secure local copy of AuthKey_<KEY_ID>.p8 with chmod 600 before testing.';
+    }
     if (/Reports key auth failed|Reports key/i.test(combined) && /private key|could not be parsed|failed to parse|asn1/i.test(combined)) {
-      return 'Use the original downloaded AuthKey_<KEY_ID>.p8 file for the Reports key. The wizard bypasses old asc keychain credentials during setup.';
+      return 'Use the original downloaded AuthKey_<KEY_ID>.p8 file for the Reports key. The wizard bypasses old asc keychain/config credentials during setup.';
     }
     if (/Setup Admin key auth failed|Admin key/i.test(combined) && /private key|could not be parsed|failed to parse|asn1/i.test(combined)) {
       return 'Use the original downloaded AuthKey_<KEY_ID>.p8 file for the Setup Admin key. This key is temporary and should have the Admin role.';
@@ -2924,6 +2933,16 @@ function inferAscKeyIdFromPrivateKeyPath(filePath) {
   const fileName = path.basename(String(filePath || '').trim());
   const match = fileName.match(/^AuthKey_([A-Za-z0-9]+)\.p8$/);
   return match?.[1] || '';
+}
+
+async function copyAscPrivateKeyToSecurePath(sourcePath, keyId: string, suffix = '') {
+  const destinationPath = resolveAscPrivateKeyPath(keyId, suffix);
+  await fs.mkdir(path.dirname(destinationPath), { recursive: true, mode: 0o700 });
+  if (path.resolve(sourcePath) !== path.resolve(destinationPath)) {
+    await fs.copyFile(sourcePath, destinationPath);
+  }
+  await fs.chmod(destinationPath, 0o600);
+  return destinationPath;
 }
 
 function renderEnvValue(value) {
@@ -4273,6 +4292,7 @@ async function guideAscConnector(rl, secrets: Record<string, string>) {
   process.stdout.write(`${bold('Enter the Reports key now:')}\n`);
   printBullets([
     `${bold('.p8 path')} to Apple\'s original ${bold('AuthKey_<KEY_ID>.p8')} file. ${bold('Do not rename it')}; KEY_ID is read from the filename.`,
+    `The wizard saves a secure local copy with ${bold('chmod 600')}.`,
     `${bold('Issuer ID')} from the API keys page. Same value for both keys.`,
     `${bold('Vendor Number')} from Sales and Trends > Reports.`,
   ]);
@@ -4284,11 +4304,13 @@ async function guideAscConnector(rl, secrets: Record<string, string>) {
   });
   let keyId = normalKeyPath.keyId;
   if (normalKeyPath.privateKeyPath) {
-    secrets.ASC_PRIVATE_KEY_PATH = normalKeyPath.privateKeyPath;
+    const securePrivateKeyPath = await copyAscPrivateKeyToSecurePath(normalKeyPath.privateKeyPath, keyId);
+    secrets.ASC_PRIVATE_KEY_PATH = securePrivateKeyPath;
     secrets.ASC_PRIVATE_KEY = DELETE_SECRET;
     secrets.ASC_PRIVATE_KEY_B64 = DELETE_SECRET;
     secrets.ASC_KEY_ID = keyId;
     process.stdout.write(`Inferred ASC_KEY_ID=${keyId} from ${path.basename(normalKeyPath.privateKeyPath)}.\n`);
+    process.stdout.write(`Saved secure Reports key copy to ${securePrivateKeyPath} with chmod 600.\n`);
   }
   const issuerId = await ask(rl, 'ASC_ISSUER_ID (same for both keys, empty = skip)', process.env.ASC_ISSUER_ID || '');
   if (issuerId.trim()) secrets.ASC_ISSUER_ID = issuerId.trim();
@@ -4327,7 +4349,7 @@ async function guideAscBootstrapAdminKey(rl, issuerIdDefault = '') {
   printBullets([
     `${bold('Role must be Admin')} so Apple can create the first App Analytics report request.`,
     `${bold('Use original AuthKey_<KEY_ID>.p8 filename')} so KEY_ID is read automatically.`,
-    `${bold('Not saved')} to secrets.env. Revoke this key after setup.`,
+    `${bold('Not saved')} to secrets.env. The temporary secure copy is deleted after setup.`,
   ]);
   const bootstrapKeyPath = await askAscPrivateKeyPathWithKeyId(rl, {
     label: 'Setup Admin .p8 path (AuthKey_<KEY_ID>.p8, empty = paste)',
@@ -4340,10 +4362,11 @@ async function guideAscBootstrapAdminKey(rl, issuerIdDefault = '') {
     bootstrapIssuerId = await ask(rl, 'ASC_ISSUER_ID (same API keys page)', process.env.ASC_ISSUER_ID || '');
   }
   if (bootstrapKeyPath.privateKeyPath) {
-    bootstrapEnv.ASC_BOOTSTRAP_PRIVATE_KEY_PATH = bootstrapKeyPath.privateKeyPath;
+    const secureBootstrapPath = await copyAscPrivateKeyToSecurePath(bootstrapKeyPath.privateKeyPath, bootstrapKeyId, '_bootstrap_admin');
+    bootstrapEnv.ASC_BOOTSTRAP_PRIVATE_KEY_PATH = secureBootstrapPath;
     process.stdout.write(`Inferred ASC_BOOTSTRAP_KEY_ID=${bootstrapKeyId} from ${path.basename(bootstrapKeyPath.privateKeyPath)}.\n`);
-    const shouldDelete = await askYesNo(rl, 'Delete this temporary Admin .p8 file from this host after the setup check?', true);
-    if (shouldDelete) bootstrapEnv.ASC_BOOTSTRAP_PRIVATE_KEY_DELETE_AFTER_USE = '1';
+    process.stdout.write(`Saved secure temporary Admin key copy to ${secureBootstrapPath} with chmod 600.\n`);
+    bootstrapEnv.ASC_BOOTSTRAP_PRIVATE_KEY_DELETE_AFTER_USE = '1';
   } else {
     bootstrapKeyId = await ask(rl, 'ASC_BOOTSTRAP_KEY_ID (from AuthKey_<KEY_ID>.p8)', '');
   }
