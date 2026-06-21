@@ -3620,11 +3620,15 @@ function validateAscPrivateKeyContent(value) {
   }
 }
 
-async function askAscPrivateKeyContent(rl, options: { envName?: string; persistLabel?: string } = {}) {
+async function askAscPrivateKeyContent(
+  rl,
+  options: { envName?: string; persistLabel?: string; keyLabel?: string } = {},
+) {
   const envName = options.envName || 'ASC_PRIVATE_KEY';
   const persistLabel = options.persistLabel || 'ASC_PRIVATE_KEY_PATH';
+  const keyLabel = options.keyLabel || 'this App Store Connect key';
   process.stdout.write(
-    '\nPaste the full .p8 file content here. Leave the first line empty if you already saved the .p8 file on this host.\n',
+    `\nPaste the full .p8 file content for ${keyLabel}.\nLeave the first line empty if the .p8 file is already saved on this host.\n`,
   );
   process.stdout.write(`The wizard validates the pasted key, stores it locally with chmod 600, and only saves ${persistLabel}.\n`);
 
@@ -4216,54 +4220,44 @@ async function guideCoolifyConnector(rl, secrets: Record<string, string>) {
 
 async function guideAscConnector(rl, secrets: Record<string, string>) {
   printSection('App Store Connect CLI', [
-    'Use this mainly for App Store analytics batch reports, plus builds, TestFlight, reviews, ratings, and store context.',
-    'Growth Engineer uses App Store Connect API-key reports only. Web login is not part of setup or health checks.',
+    'You need two App Store Connect API keys: one normal reporting key and one temporary Admin key.',
+    'Create both here: https://appstoreconnect.apple.com/access/integrations/api',
   ]);
-  process.stdout.write('Create two App Store Connect API keys before continuing:\n  https://appstoreconnect.apple.com/access/integrations/api\n\n');
+  process.stdout.write('\nStep 1 - normal key, saved for Growth Engineer\n');
   printBullets([
-    'Steady-state key: Sales and Reports, or Finance. Growth Engineer stores this key for normal analytics downloads.',
-    'Temporary bootstrap key: Admin. Growth Engineer uses this once to initialize App Analytics report generation, does not save it to secrets.env, and deletes the local Admin .p8 immediately after analytics initialization.',
-    'After setup, revoke the temporary Admin API key in App Store Connect.',
+    'Create an API key named "Growth Engineer Reports".',
+    'Role: Sales and Reports. Finance or Admin also works.',
+    'Optional extra roles: Customer Support for reviews, Developer for builds/TestFlight.',
+    'Copy this key into the ASC_KEY_ID, ASC_ISSUER_ID, and ASC_PRIVATE_KEY prompts below.',
   ]);
-  process.stdout.write('\nRoles to choose:\n');
+  process.stdout.write('\nStep 2 - temporary Admin key, used once\n');
   printBullets([
-    'Recommended for normal continuous analytics downloads: Sales and Reports.',
-    'Finance also works for generated analytics report downloads.',
-    'Admin is not required for daily or continuous analytics ingestion once an ONGOING Analytics Report Request already exists.',
-    'Growth Engineer setup requires a temporary Admin bootstrap key so it can create the initial Analytics Report Request when it is missing.',
-    'Recommended: Customer Support, for App Store ratings and review text.',
-    'Recommended: Developer, for builds, TestFlight, and delivery status.',
-    'Optional: App Manager, only if OpenClaw should also read or manage app metadata, pricing, or release settings.',
-    'Least privilege steady state: keep Growth Engineer configured with Sales and Reports, and use the Admin key only temporarily during setup.',
+    'Create a second API key named "Growth Engineer Setup Admin".',
+    'Role: Admin.',
+    'Use it only when the wizard asks for ASC_BOOTSTRAP_* later.',
+    'The wizard does not save this key to secrets.env. Revoke it in App Store Connect after setup.',
   ]);
-  process.stdout.write('\nWhy an Admin key may be requested during setup:\n');
+  process.stdout.write('\nWhy two keys?\n');
   printBullets([
-    'Growth Engineer first checks for existing ongoing App Analytics report requests.',
-    'If a request already exists, daily ingestion only reads generated report instances and downloads segments; Admin is not needed.',
-    'If no request exists and Growth Engineer must create one, Apple requires an Admin-role API key for that creation step.',
-    'After the request exists, remove or revoke the temporary Admin key and keep using Sales and Reports or Finance for steady-state downloads.',
+    'Apple requires Admin once to create the initial App Analytics report request.',
+    'After that, Growth Engineer only needs the normal reporting key for downloads.',
   ]);
-  process.stdout.write('\nImportant:\n');
+  process.stdout.write('\nNeeded values for the normal key now\n');
   printBullets([
-    'An Analytics Report Request is Apple\'s persistent report-generation subscription.',
-    'Daily ingestion does not create a new request every day.',
-    'The wizard stores only the normal ASC key for operation; the temporary Admin key is not saved and its local .p8 is deleted after analytics initialization.',
-  ]);
-  process.stdout.write('\nFor the steady-state key, copy these values into this wizard:\n');
-  printBullets([
-    'Issuer ID from the API keys page.',
-    'Key ID from the API key row or from the downloaded file name: AuthKey_<KEY_ID>.p8.',
-    'Download the .p8 file, open it, then paste the full file content into this terminal.',
-    'If the .p8 is already on this host, leave the content prompt empty and paste the file path instead.',
-    'Vendor Number from App Store Connect Sales and Trends > Reports. Required for healthy ASC status because Sales and Trends/App Units depend on it.',
+    'Issuer ID: shown at the top of the API keys page.',
+    'Key ID: shown in the key row or in the file name AuthKey_<KEY_ID>.p8.',
+    '.p8 private key: download it once, open it, and paste the full file content.',
+    'Vendor Number: App Store Connect > Sales and Trends > Reports.',
   ]);
 
-  const keyId = await ask(rl, 'ASC_KEY_ID (leave empty to skip)', process.env.ASC_KEY_ID || '');
-  const issuerId = await ask(rl, 'ASC_ISSUER_ID (leave empty to skip)', process.env.ASC_ISSUER_ID || '');
+  const keyId = await ask(rl, 'ASC_KEY_ID for normal reporting key (leave empty to skip)', process.env.ASC_KEY_ID || '');
+  const issuerId = await ask(rl, 'ASC_ISSUER_ID for normal reporting key (leave empty to skip)', process.env.ASC_ISSUER_ID || '');
   if (keyId.trim()) secrets.ASC_KEY_ID = keyId.trim();
   if (issuerId.trim()) secrets.ASC_ISSUER_ID = issuerId.trim();
 
-  const privateKeyContent = await askAscPrivateKeyContent(rl);
+  const privateKeyContent = await askAscPrivateKeyContent(rl, {
+    keyLabel: 'the normal reporting key',
+  });
   if (privateKeyContent) {
     const privateKeyPath = resolveAscPrivateKeyPath(keyId);
     await fs.mkdir(path.dirname(privateKeyPath), { recursive: true, mode: 0o700 });
@@ -4288,16 +4282,16 @@ async function guideAscConnector(rl, secrets: Record<string, string>) {
 
 async function guideAscBootstrapAdminKey(rl, issuerIdDefault = '') {
   const bootstrapEnv: Record<string, string> = {};
-  process.stdout.write('\nTemporary Admin bootstrap key required for ASC analytics setup\n');
+  process.stdout.write('\nStep 3 - temporary Admin key for first ASC setup\n');
   printBullets([
-    'The normal key is used for ongoing analytics downloads; the Admin key is only for one-time report-request bootstrap.',
-    'Apple requires an Admin-role API key for that creation step.',
-    'The wizard does not save these ASC_BOOTSTRAP_* values to secrets.env.',
-    'If you paste the .p8 content here, the local temporary .p8 file is deleted immediately after analytics initialization.',
-    'After setup, you can also revoke the temporary Admin API key in App Store Connect.',
+    'Use the second key you created with the Admin role.',
+    'This is only needed to create the first App Analytics report request.',
+    'The wizard does not save ASC_BOOTSTRAP_* to secrets.env.',
+    'If you paste the .p8 content, the local temporary file is deleted after analytics initialization.',
+    'Revoke this Admin key in App Store Connect after setup.',
   ]);
-  const bootstrapKeyId = await ask(rl, 'ASC_BOOTSTRAP_KEY_ID (temporary Admin key, required)', '');
-  const bootstrapIssuerId = await ask(rl, 'ASC_BOOTSTRAP_ISSUER_ID (temporary Admin key)', issuerIdDefault);
+  const bootstrapKeyId = await ask(rl, 'ASC_BOOTSTRAP_KEY_ID for temporary Admin key (required)', '');
+  const bootstrapIssuerId = await ask(rl, 'ASC_BOOTSTRAP_ISSUER_ID for temporary Admin key', issuerIdDefault);
   if (!bootstrapKeyId.trim() || !bootstrapIssuerId.trim()) return { bootstrapEnv };
   bootstrapEnv.ASC_BOOTSTRAP_KEY_ID = bootstrapKeyId.trim();
   bootstrapEnv.ASC_BOOTSTRAP_ISSUER_ID = bootstrapIssuerId.trim();
@@ -4305,6 +4299,7 @@ async function guideAscBootstrapAdminKey(rl, issuerIdDefault = '') {
   const bootstrapPrivateKeyContent = await askAscPrivateKeyContent(rl, {
     envName: 'ASC_BOOTSTRAP_PRIVATE_KEY',
     persistLabel: 'ASC_BOOTSTRAP_PRIVATE_KEY_PATH temporarily',
+    keyLabel: 'the temporary Admin key',
   });
   if (bootstrapPrivateKeyContent) {
     const bootstrapPrivateKeyPath = resolveAscPrivateKeyPath(bootstrapKeyId, '_bootstrap_admin');
