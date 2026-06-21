@@ -1828,6 +1828,10 @@ async function ensureAscAppConfigured(configPath, explicitAppId) {
 }
 
 function extractAscAnalyticsRequestIds(payload) {
+  return extractAscAnalyticsRequests(payload).map((request) => request.id);
+}
+
+function extractAscAnalyticsRequests(payload) {
   const candidates = (() => {
     if (Array.isArray(payload)) return payload;
     if (payload && typeof payload === 'object') {
@@ -1839,13 +1843,23 @@ function extractAscAnalyticsRequestIds(payload) {
     return [];
   })();
 
-  const ids = [];
+  const requests = [];
+  const seenIds = new Set();
   for (const candidate of candidates) {
     if (!candidate || typeof candidate !== 'object') continue;
     const id = normalizeString(candidate.id) || normalizeString(candidate.requestId) || normalizeString(candidate.request_id);
-    if (id) ids.push(id);
+    if (!id || seenIds.has(id)) continue;
+    seenIds.add(id);
+    const attributes = candidate.attributes && typeof candidate.attributes === 'object' ? candidate.attributes : {};
+    const state = normalizeString(candidate.state) ||
+      normalizeString(candidate.requestState) ||
+      normalizeString(candidate.request_state) ||
+      normalizeString(attributes.state) ||
+      normalizeString(attributes.requestState) ||
+      normalizeString(attributes.request_state);
+    requests.push({ id, state });
   }
-  return [...new Set(ids)];
+  return requests;
 }
 
 function extractAscAnalyticsRequestId(payload) {
@@ -1856,9 +1870,8 @@ function extractAscAnalyticsRequestId(payload) {
   return extractAscAnalyticsRequestIds(payload)[0] || null;
 }
 
-async function listAscAnalyticsRequests(appId, state = '') {
-  const stateArg = state ? ` --state ${quote(state)}` : '';
-  const result = await runShellCommand(`asc analytics requests --app ${quote(appId)}${stateArg} --output json`, 60_000, {
+async function listAscAnalyticsRequests(appId) {
+  const result = await runShellCommand(`asc analytics requests --app ${quote(appId)} --output json`, 60_000, {
     env: ascIsolatedEnv(),
   });
   if (!result.ok) {
@@ -1869,7 +1882,8 @@ async function listAscAnalyticsRequests(appId, state = '') {
       error: describeAscPrivateKeyAuthFailure('Reports', error) || error,
     };
   }
-  return { ok: true, ids: extractAscAnalyticsRequestIds(parseJsonFromStdout(result.stdout)), error: null };
+  const requests = extractAscAnalyticsRequests(parseJsonFromStdout(result.stdout));
+  return { ok: true, ids: requests.map((request) => request.id), requests, error: null };
 }
 
 function getAscBootstrapAdminEnv() {
@@ -1924,17 +1938,13 @@ async function ensureAscAnalyticsRequest(appId) {
     return { ok: true, status: 'skipped', requestId: null, detail: 'no single ASC app configured' };
   }
 
-  const completedRequests = await listAscAnalyticsRequests(normalizedAppId, 'COMPLETED');
-  if (!completedRequests.ok) {
-    return { ok: false, status: 'query_failed', requestId: null, error: completedRequests.error };
-  }
-  if (completedRequests.ids.length > 0) {
-    return { ok: true, status: 'completed', requestId: completedRequests.ids[0], detail: `completed request ${completedRequests.ids[0]}` };
-  }
-
   const existingRequests = await listAscAnalyticsRequests(normalizedAppId);
   if (!existingRequests.ok) {
     return { ok: false, status: 'query_failed', requestId: null, error: existingRequests.error };
+  }
+  const completedRequest = existingRequests.requests.find((request) => request.state.toUpperCase() === 'COMPLETED');
+  if (completedRequest) {
+    return { ok: true, status: 'completed', requestId: completedRequest.id, detail: `completed request ${completedRequest.id}` };
   }
   if (existingRequests.ids.length > 0) {
     return { ok: true, status: 'pending', requestId: existingRequests.ids[0], detail: `existing request ${existingRequests.ids[0]} is not completed yet` };

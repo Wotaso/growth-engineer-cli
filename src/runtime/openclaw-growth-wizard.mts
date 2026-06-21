@@ -2342,6 +2342,9 @@ function summarizeFailureFix(connector, blockers) {
     return 'Paste a Coolify base URL and read-only API token from Keys & Tokens / API tokens, then rerun setup.';
   }
   if (connector === 'asc') {
+    if (/invalid value: ['"]?state|parameter has an invalid value: ['"]?state|--state/i.test(combined)) {
+      return 'Update Growth Engineer and rerun ASC setup. Setup no longer uses the flaky ASC analytics request state filter.';
+    }
     if (/file permissions are too open|too permissive|chmod 600/i.test(combined)) {
       return 'Rerun ASC setup. The wizard saves a secure local copy of AuthKey_<KEY_ID>.p8 with chmod 600 before testing.';
     }
