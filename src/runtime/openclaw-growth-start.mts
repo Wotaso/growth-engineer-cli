@@ -2124,14 +2124,14 @@ function isInvalidAscPrivateKeyError(error) {
 
 function describeAscAppSetupFailure(error) {
   if (isInvalidAscPrivateKeyError(error)) {
-    return 'ASC .p8 file is invalid or truncated.';
+    return 'ASC auth failed: the .p8 key could not be parsed.';
   }
   return `Could not list App Store Connect apps (${error || 'unknown error'})`;
 }
 
 function remediateAscAppSetupFailure(error) {
   if (isInvalidAscPrivateKeyError(error)) {
-    return 'Rerun ASC setup and choose the original valid AuthKey_<KEY_ID>.p8 file, or paste the full key content from BEGIN PRIVATE KEY to END PRIVATE KEY.';
+    return 'Rerun ASC setup and choose the original downloaded AuthKey_<KEY_ID>.p8 file for the Reports key. The wizard removes old pasted ASC_PRIVATE_KEY values when a file path is used.';
   }
   return 'Verify ASC credentials, key role access, and `asc apps list --output json`.';
 }

@@ -30,6 +30,7 @@ const ENABLE_ISOLATED_SECRET_RUNNER_WIZARD = false;
 const DEFAULT_GROWTH_INTERVAL_MINUTES = 90;
 const DEFAULT_CONNECTOR_HEALTH_INTERVAL_MINUTES = 360;
 const DEFAULT_SCHEDULER_PROOF_PATH = 'data/openclaw-growth-engineer/runtime/scheduler-proof.jsonl';
+const DELETE_SECRET = '__OPENCLAW_DELETE_SECRET__';
 const GROWTH_ENGINEER_PACKAGE_SPEC =
   process.env.OPENCLAW_GROWTH_ENGINEER_PACKAGE || '@analyticscli/growth-engineer@preview';
 const RUNTIME_DIR = path.dirname(fileURLToPath(import.meta.url));
@@ -2288,8 +2289,8 @@ function getPassingConnectorKeys(payload, failedConnectors = new Set()) {
 
 function summarizeFailureReason(detail) {
   const text = String(detail || '').replace(/\s+/g, ' ').trim();
-  if (/ASC .*\.p8 private key is invalid|invalid or truncated|sequence truncated|malformed/i.test(text)) {
-    return 'ASC .p8 file is invalid or truncated';
+  if (/ASC .*\.p8 private key is invalid|invalid private key|failed to parse|sequence truncated|malformed|asn1/i.test(text)) {
+    return 'ASC auth failed: the .p8 key could not be parsed';
   }
   if (/token has been revoked/i.test(text)) return 'token has been revoked';
   if (/unauthorized|UNAUTHORIZED/i.test(text)) return 'token is unauthorized';
@@ -2330,7 +2331,7 @@ function summarizeFailureFix(connector, blockers) {
   }
   if (connector === 'asc') {
     if (/invalid|truncated|malformed|private key/i.test(combined)) {
-      return 'Choose the original valid AuthKey_<KEY_ID>.p8 file, or paste the full key content from BEGIN PRIVATE KEY to END PRIVATE KEY.';
+      return 'Use the original downloaded AuthKey_<KEY_ID>.p8 for the Reports key. Old pasted ASC_PRIVATE_KEY values are removed when you choose a file path.';
     }
     return 'Rerun ASC setup and verify ASC credentials, key role access, and `asc apps list --output json`.';
   }
@@ -2558,7 +2559,7 @@ function renderHealthProgress(items, message = 'Live checks running...', title =
   process.stdout.write('------------\n');
   process.stdout.write(`${message}\n\n`);
   if (final) {
-    process.stdout.write('Checks complete.\n\n');
+    process.stdout.write('');
   } else {
     process.stdout.write(`${finished}/${visibleItems.length} checks finished.\n\n`);
   }
@@ -2696,6 +2697,11 @@ async function runSetupCommandWithProgress(command, env, selected: ConnectorKey[
   }, { env, timeoutMs: 180_000 }).finally(() => {
     if (spinnerInterval) clearInterval(spinnerInterval);
   });
+  const payload = parseJsonFromStdout(result.stdout);
+  if (Array.isArray(payload?.blockers) && payload.blockers.length > 0) {
+    if (process.stdout.isTTY) clearTerminal();
+    return result;
+  }
   updateProgressItem(plan, 'finalize', 'pass', 'result received');
   renderHealthProgress(plan, 'Connector setup test finished.', 'Connector setup test', { final: true });
   return result;
@@ -2705,7 +2711,7 @@ async function saveSecretsImmediately(secrets: Record<string, string>) {
   if (Object.keys(secrets).length === 0) return false;
   const secretsFile = resolveSecretsFile();
   await writeSecretsFile(secretsFile, secrets);
-  Object.assign(process.env, secrets);
+  applySecretsToProcessEnv(secrets);
   process.stdout.write(`Saved local secrets to ${secretsFile} with chmod 600.\n`);
   return true;
 }
@@ -2931,6 +2937,10 @@ async function readSecretsFile(filePath) {
 async function writeSecretsFile(filePath, nextValues: Record<string, string>) {
   const current = await readSecretsFile(filePath);
   for (const [key, value] of Object.entries(nextValues)) {
+    if (value === DELETE_SECRET) {
+      current.delete(key);
+      continue;
+    }
     if (value.trim()) current.set(key, value.trim());
   }
   await fs.mkdir(path.dirname(filePath), { recursive: true, mode: 0o700 });
@@ -2942,6 +2952,16 @@ async function writeSecretsFile(filePath, nextValues: Record<string, string>) {
   ];
   await fs.writeFile(filePath, lines.join('\n'), { encoding: 'utf8', mode: 0o600 });
   await fs.chmod(filePath, 0o600);
+}
+
+function applySecretsToProcessEnv(nextValues: Record<string, string>) {
+  for (const [key, value] of Object.entries(nextValues)) {
+    if (value === DELETE_SECRET) {
+      delete process.env[key];
+      continue;
+    }
+    if (value.trim()) process.env[key] = value.trim();
+  }
 }
 
 function renderBashSingleQuoted(value) {
@@ -4239,6 +4259,8 @@ async function guideAscConnector(rl, secrets: Record<string, string>) {
   let keyId = normalKeyPath.keyId;
   if (normalKeyPath.privateKeyPath) {
     secrets.ASC_PRIVATE_KEY_PATH = normalKeyPath.privateKeyPath;
+    secrets.ASC_PRIVATE_KEY = DELETE_SECRET;
+    secrets.ASC_PRIVATE_KEY_B64 = DELETE_SECRET;
     secrets.ASC_KEY_ID = keyId;
     process.stdout.write(`Inferred ASC_KEY_ID=${keyId} from ${path.basename(normalKeyPath.privateKeyPath)}.\n`);
   }
@@ -4258,6 +4280,8 @@ async function guideAscConnector(rl, secrets: Record<string, string>) {
     await fs.writeFile(privateKeyPath, privateKeyContent, { encoding: 'utf8', mode: 0o600 });
     await fs.chmod(privateKeyPath, 0o600);
     secrets.ASC_PRIVATE_KEY_PATH = privateKeyPath;
+    secrets.ASC_PRIVATE_KEY = DELETE_SECRET;
+    secrets.ASC_PRIVATE_KEY_B64 = DELETE_SECRET;
     process.stdout.write(`Saved ASC private key to ${privateKeyPath} with chmod 600.\n`);
   }
 
