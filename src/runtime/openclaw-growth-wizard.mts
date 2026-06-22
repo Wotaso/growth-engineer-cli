@@ -4929,10 +4929,43 @@ function isBackAnswer(value) {
   return [':back', '\x1b'].includes(normalized);
 }
 
+async function askQuestionWithEscBack(rl, query) {
+  if (!process.stdin.isTTY || !process.stdin.setRawMode) {
+    return await rl.question(query);
+  }
+
+  emitKeypressEvents(process.stdin);
+  const wasRaw = process.stdin.isRaw;
+  const controller = new AbortController();
+  let backRequested = false;
+
+  const onKeypress = (_text, key) => {
+    if (key?.name !== 'escape') return;
+    backRequested = true;
+    clearPromptInput(rl);
+    controller.abort();
+  };
+
+  process.stdin.on('keypress', onKeypress);
+  process.stdin.setRawMode(true);
+  try {
+    return await rl.question(query, { signal: controller.signal });
+  } catch (error) {
+    if (backRequested || error?.name === 'AbortError') {
+      process.stdout.write('\n');
+      throw new WizardBackError();
+    }
+    throw error;
+  } finally {
+    process.stdin.off('keypress', onKeypress);
+    process.stdin.setRawMode(Boolean(wasRaw));
+  }
+}
+
 async function ask(rl, label, defaultValue = '') {
   const suffix = defaultValue ? ` (${defaultValue})` : '';
   clearPromptInput(rl);
-  const answer = (await rl.question(`${label}${suffix}: `)).trim();
+  const answer = (await askQuestionWithEscBack(rl, `${label}${suffix}: `)).trim();
   if (isBackAnswer(answer)) throw new WizardBackError();
   return answer || defaultValue;
 }
@@ -4941,7 +4974,7 @@ async function askYesNo(rl, label, defaultYes = true) {
   const suffix = defaultYes ? '[Y/n]' : '[y/N]';
   while (true) {
     clearPromptInput(rl);
-    const answer = (await rl.question(`${label} ${suffix} `)).trim().toLowerCase();
+    const answer = (await askQuestionWithEscBack(rl, `${label} ${suffix} `)).trim().toLowerCase();
     if (isBackAnswer(answer)) throw new WizardBackError();
     if (!answer) return defaultYes;
     if (answer === 'y' || answer === 'yes') return true;
