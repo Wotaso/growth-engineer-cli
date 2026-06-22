@@ -1944,12 +1944,12 @@ async function ensureAscAnalyticsRequest(appId) {
   if (!existingRequests.ok) {
     return { ok: false, status: 'query_failed', requestId: null, error: existingRequests.error };
   }
-  const completedRequest = existingRequests.requests.find((request) => request.state.toUpperCase() === 'COMPLETED');
+  const completedRequest = existingRequests.requests.find((request) => normalizeString(request.state)?.toUpperCase() === 'COMPLETED');
   if (completedRequest) {
     return { ok: true, status: 'completed', requestId: completedRequest.id, detail: `completed request ${completedRequest.id}` };
   }
   if (existingRequests.ids.length > 0) {
-    return { ok: true, status: 'pending', requestId: existingRequests.ids[0], detail: `existing request ${existingRequests.ids[0]} is not completed yet` };
+    return { ok: true, status: 'pending', requestId: existingRequests.ids[0], detail: `existing request ${existingRequests.ids[0]} found; report instances may still be processing` };
   }
 
   const created = await runShellCommand(
