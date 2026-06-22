@@ -1834,17 +1834,7 @@ function mergeActiveConnectorIncidents(
       const incident = activeIncidents[key];
       if (!incident) return [key, liveHealth];
       if (liveHealth.status === 'connected') {
-        return [
-          key,
-          {
-            ...liveHealth,
-            status: 'partial',
-            detail: `Live wizard check passed, but the runner still has an active ${incident.status} incident; run the connector health job once to record recovery.`,
-            activeRunnerIncident: true,
-            activeIncidentFingerprint: incident.activeIncidentFingerprint,
-            lastCheckedAt: incident.lastCheckedAt,
-          },
-        ];
+        return [key, liveHealth];
       }
       return [
         key,
