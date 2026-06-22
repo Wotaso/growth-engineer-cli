@@ -1409,7 +1409,7 @@ async function askMultiChoiceByKeys<T extends string>({
         process.stdout.write(`${pointer} ${checkbox} ${index + 1}) ${ANSI.bold}${option.label}${ANSI.reset}${requiredLabel}\n`);
         writeWrapped(option.detail, '      ', ANSI.dim);
       }
-      process.stdout.write(`\n${ANSI.dim}Esc/B/← back. Q cancels. Space toggles, A toggles all optional items, Enter continues. Number keys 1-${options.length} toggle items.${ANSI.reset}\n`);
+      process.stdout.write(`\n${ANSI.dim}Esc/← back. Ctrl+C cancels. Space toggles, Enter continues. Number keys 1-${options.length} toggle items.${ANSI.reset}\n`);
     };
 
     const back = () => {
@@ -1455,31 +1455,18 @@ async function askMultiChoiceByKeys<T extends string>({
         cancel();
         return;
       }
-      if (key?.name === 'q') {
-        cancel();
-        return;
-      }
-      if (key?.name === 'escape' || key?.name === 'left' || key?.name === 'b') {
+      if (key?.name === 'escape' || key?.name === 'left') {
         back();
         return;
       }
-      if (key?.name === 'up' || key?.name === 'k') {
+      if (key?.name === 'up') {
         cursorIndex = (cursorIndex - 1 + options.length) % options.length;
         warning = '';
-      } else if (key?.name === 'down' || key?.name === 'j') {
+      } else if (key?.name === 'down') {
         cursorIndex = (cursorIndex + 1) % options.length;
         warning = '';
       } else if (key?.name === 'space') {
         toggleIndex(cursorIndex);
-      } else if (String(_text || '').toLowerCase() === 'a') {
-        const optional = options.filter((option) => !required.has(option.value));
-        const allSelected = optional.every((option) => selected.has(option.value));
-        optional.forEach((option) => {
-          if (allSelected) selected.delete(option.value);
-          else selected.add(option.value);
-        });
-        requiredValues.forEach((value) => selected.add(value));
-        warning = '';
       } else if (key?.name === 'return' || key?.name === 'enter') {
         finish();
         return;
@@ -1538,7 +1525,7 @@ async function askMenuChoiceByKeys<T extends string>({
         process.stdout.write(`${pointer} ${number} ${ANSI.bold}${option.label}${ANSI.reset}\n`);
         writeWrapped(option.detail, '     ', ANSI.dim);
       }
-      process.stdout.write(`\n${ANSI.dim}Esc/B/← back. Q cancels. Number keys 1-${options.length} select directly.${ANSI.reset}\n`);
+      process.stdout.write(`\n${ANSI.dim}Esc/← back. Ctrl+C cancels. Number keys 1-${options.length} select directly.${ANSI.reset}\n`);
     };
 
     const back = () => {
@@ -1564,17 +1551,13 @@ async function askMenuChoiceByKeys<T extends string>({
         cancel();
         return;
       }
-      if (key?.name === 'q') {
-        cancel();
-        return;
-      }
-      if (key?.name === 'escape' || key?.name === 'left' || key?.name === 'b') {
+      if (key?.name === 'escape' || key?.name === 'left') {
         back();
         return;
       }
-      if (key?.name === 'up' || key?.name === 'k') {
+      if (key?.name === 'up') {
         cursorIndex = (cursorIndex - 1 + options.length) % options.length;
-      } else if (key?.name === 'down' || key?.name === 'j') {
+      } else if (key?.name === 'down') {
         cursorIndex = (cursorIndex + 1) % options.length;
       } else if (key?.name === 'return' || key?.name === 'enter') {
         finish();
@@ -1959,7 +1942,7 @@ function renderConnectorPicker(
   if (warning) {
     process.stdout.write(`${ANSI.bold}${warning}${ANSI.reset}\n\n`);
   }
-  process.stdout.write(`${ANSI.dim}Esc/B/← back. Q cancels. Number keys 1-${CONNECTOR_DEFINITIONS.length} also toggle connectors.${ANSI.reset}\n`);
+  process.stdout.write(`${ANSI.dim}Esc/← back. Ctrl+C cancels. Number keys 1-${CONNECTOR_DEFINITIONS.length} also toggle connectors.${ANSI.reset}\n`);
 }
 
 async function askConnectorSelectionByKeys(
@@ -2034,40 +2017,25 @@ async function askConnectorSelectionByKeys(
       warning = '';
     };
 
-    const toggleAll = () => {
-      const optionalKeys = CONNECTOR_KEYS.filter((key) => !required.has(key));
-      const allOptionalSelected = optionalKeys.every((key) => selected.has(key));
-      if (allOptionalSelected) optionalKeys.forEach((key) => selected.delete(key));
-      else optionalKeys.forEach((key) => selected.add(key));
-      required.forEach((key) => selected.add(key));
-      warning = '';
-    };
-
     const onKeypress = (_text, key) => {
       if (key?.ctrl && key?.name === 'c') {
         cancel();
         return;
       }
-      if (key?.name === 'q') {
-        cancel();
-        return;
-      }
-      if (key?.name === 'escape' || key?.name === 'left' || key?.name === 'b') {
+      if (key?.name === 'escape' || key?.name === 'left') {
         back();
         return;
       }
-      if (key?.name === 'up' || key?.name === 'k') {
+      if (key?.name === 'up') {
         const itemCount = displayItems().length || CONNECTOR_DEFINITIONS.length;
         cursorIndex = (cursorIndex - 1 + itemCount) % itemCount;
         warning = '';
-      } else if (key?.name === 'down' || key?.name === 'j') {
+      } else if (key?.name === 'down') {
         const itemCount = displayItems().length || CONNECTOR_DEFINITIONS.length;
         cursorIndex = (cursorIndex + 1) % itemCount;
         warning = '';
       } else if (key?.name === 'space') {
         toggleCurrent();
-      } else if (key?.name === 'a') {
-        toggleAll();
       } else if (key?.name === 'return' || key?.name === 'enter') {
         finish();
         return;
@@ -4907,7 +4875,7 @@ async function runConnectorSetupWizard(args) {
     while (true) {
       clearTerminal();
       printConnectorIntro({
-        introDetail: 'API keys stay in this host\'s local secrets file. Use Esc/B/← in menus or type :back in text prompts to return.',
+        introDetail: 'API keys stay in this host\'s local secrets file. Use Esc/← in menus or type :back in text prompts to return.',
       });
       await migrateRuntimeSourceCommandsFile(args.config);
       const healthCheckConnectors = await connectorKeysForHealthCheck(args.config);
@@ -4958,7 +4926,7 @@ function clearPromptInput(rl) {
 
 function isBackAnswer(value) {
   const normalized = String(value || '').trim().toLowerCase();
-  return [':back', 'esc', 'escape', '\x1b'].includes(normalized);
+  return [':back', '\x1b'].includes(normalized);
 }
 
 async function ask(rl, label, defaultValue = '') {
@@ -5167,7 +5135,7 @@ async function askWizardGoal(rl) {
 function printWizardHeader() {
   process.stdout.write('OpenClaw Growth Engineer - Setup Wizard\n');
   process.stdout.write('This wizard can configure connector secrets. Normal config is written to config JSON; API keys stay in the local chmod 600 secrets file.\n');
-  process.stdout.write(`${ANSI.dim}Use Esc/B/← in menus or type :back in text prompts to return.${ANSI.reset}\n\n`);
+  process.stdout.write(`${ANSI.dim}Use Esc/← in menus or type :back in text prompts to return.${ANSI.reset}\n\n`);
 }
 
 async function buildDefaultWizardConfig(configPath = null) {
