@@ -4411,7 +4411,7 @@ async function guideAscBootstrapAdminKey(rl, issuerIdDefault = '') {
   printBullets([
     `${bold('Role must be Admin')} so Apple can create the first App Analytics report request.`,
     `${bold('Use original AuthKey_<KEY_ID>.p8 filename')} so KEY_ID is read automatically.`,
-    `${bold('Not saved')} to secrets.env. The temporary secure copy is deleted after setup.`,
+    `${bold('Not saved')} to secrets.env. The temporary secure copy stays on this host; revoke the Admin key after setup.`,
   ]);
   const bootstrapKeyPath = await askAscPrivateKeyPathWithKeyId(rl, {
     label: 'Setup Admin .p8 path (AuthKey_<KEY_ID>.p8, empty = paste)',
@@ -4428,7 +4428,6 @@ async function guideAscBootstrapAdminKey(rl, issuerIdDefault = '') {
     bootstrapEnv.ASC_BOOTSTRAP_PRIVATE_KEY_PATH = secureBootstrapPath;
     process.stdout.write(`Inferred ASC_BOOTSTRAP_KEY_ID=${bootstrapKeyId} from ${path.basename(bootstrapKeyPath.privateKeyPath)}.\n`);
     process.stdout.write(`Saved secure temporary Admin key copy to ${secureBootstrapPath} with chmod 600.\n`);
-    bootstrapEnv.ASC_BOOTSTRAP_PRIVATE_KEY_DELETE_AFTER_USE = '1';
   } else {
     bootstrapKeyId = await ask(rl, 'ASC_BOOTSTRAP_KEY_ID (from AuthKey_<KEY_ID>.p8)', '');
   }
@@ -4449,30 +4448,19 @@ async function guideAscBootstrapAdminKey(rl, issuerIdDefault = '') {
     await fs.writeFile(bootstrapPrivateKeyPath, bootstrapPrivateKeyContent, { encoding: 'utf8', mode: 0o600 });
     await fs.chmod(bootstrapPrivateKeyPath, 0o600);
     bootstrapEnv.ASC_BOOTSTRAP_PRIVATE_KEY_PATH = bootstrapPrivateKeyPath;
-    bootstrapEnv.ASC_BOOTSTRAP_PRIVATE_KEY_DELETE_AFTER_USE = '1';
-    process.stdout.write(`Saved temporary Admin ASC private key to ${bootstrapPrivateKeyPath} with chmod 600. It will be deleted after the setup check.\n`);
+    process.stdout.write(`Saved temporary Admin ASC private key to ${bootstrapPrivateKeyPath} with chmod 600. Revoke the Admin key after setup.\n`);
   }
   return { bootstrapEnv };
 }
 
 async function cleanupTemporaryAscBootstrapPrivateKey(bootstrapEnv: Record<string, string> = {}) {
   const privateKeyPath = String(bootstrapEnv.ASC_BOOTSTRAP_PRIVATE_KEY_PATH || '').trim();
-  const shouldDelete = String(bootstrapEnv.ASC_BOOTSTRAP_PRIVATE_KEY_DELETE_AFTER_USE || '').trim().toLowerCase();
-  if (!privateKeyPath || !['1', 'true', 'yes'].includes(shouldDelete)) return;
+  if (!privateKeyPath) return;
   if (privateKeyPath === String(bootstrapEnv.ASC_PRIVATE_KEY_PATH || process.env.ASC_PRIVATE_KEY_PATH || '').trim()) {
-    process.stdout.write('Temporary Admin .p8 path matches the steady-state ASC_PRIVATE_KEY_PATH; leaving it in place.\n');
+    process.stdout.write('Temporary Admin .p8 path matches the steady-state ASC_PRIVATE_KEY_PATH; kept it in place.\n');
     return;
   }
-  try {
-    await fs.unlink(privateKeyPath);
-    process.stdout.write(`Deleted temporary Admin .p8 from ${privateKeyPath}.\n`);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException)?.code === 'ENOENT') {
-      process.stdout.write(`Temporary Admin .p8 was already absent at ${privateKeyPath}.\n`);
-      return;
-    }
-    process.stdout.write(`Could not delete temporary Admin .p8 at ${privateKeyPath}: ${error instanceof Error ? error.message : String(error)}\n`);
-  }
+  process.stdout.write(`Kept temporary Admin .p8 copy at ${privateKeyPath}.\n`);
 }
 
 function printAscBootstrapAdminRevokeNotice(bootstrapEnv: Record<string, string> = {}) {
@@ -6144,6 +6132,7 @@ async function maybeRefreshOpenClawSessionInstructions(rl, configPath) {
   process.stdout.write(`Job manifest: ${path.relative(process.cwd(), manifestPath) || manifestPath}\n`);
   process.stdout.write(`Session note: ${path.relative(process.cwd(), sessionNotePath) || sessionNotePath}\n`);
   process.stdout.write('ASC will not appear as a chat tool; OpenClaw should answer ASC access from Growth Engineer status.\n');
+  process.stdout.write('Existing OpenClaw chat sessions may need a restart to load these file changes.\n');
   return true;
 }
 

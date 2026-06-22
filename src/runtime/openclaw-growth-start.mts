@@ -1912,27 +1912,13 @@ async function removeTemporaryAscBootstrapPrivateKey() {
   if (privateKeyPath === normalizeString(process.env.ASC_PRIVATE_KEY_PATH)) {
     return {
       deleted: false,
-      detail: 'temporary Admin .p8 path matches ASC_PRIVATE_KEY_PATH; left it in place',
+      detail: 'temporary Admin .p8 path matches ASC_PRIVATE_KEY_PATH; kept it in place',
     };
   }
-  try {
-    await fs.unlink(privateKeyPath);
-    return {
-      deleted: true,
-      detail: `deleted temporary Admin .p8 from ${privateKeyPath}`,
-    };
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException)?.code === 'ENOENT') {
-      return {
-        deleted: false,
-        detail: `temporary Admin .p8 was already absent at ${privateKeyPath}`,
-      };
-    }
-    return {
-      deleted: false,
-      detail: `could not delete temporary Admin .p8 at ${privateKeyPath}: ${error instanceof Error ? error.message : String(error)}`,
-    };
-  }
+  return {
+    deleted: false,
+    detail: `kept temporary Admin .p8 copy at ${privateKeyPath}`,
+  };
 }
 
 async function ensureAscAnalyticsRequest(appId) {
@@ -2512,9 +2498,9 @@ async function main() {
         key: 'ascBootstrapAdminKeyCleanup',
         label: 'ASC temporary Admin key',
         detail: temporaryAscBootstrapKeyCleanup.detail,
-        status: temporaryAscBootstrapKeyCleanup.deleted ? 'pass' : 'warn',
+        status: 'pass',
       });
-      process.stderr.write(`${temporaryAscBootstrapKeyCleanup.detail}. You can also revoke the temporary Admin API key in App Store Connect.\n`);
+      process.stderr.write(`${temporaryAscBootstrapKeyCleanup.detail}. Revoke the temporary Admin API key in App Store Connect.\n`);
     }
     emitProgress(args.progressJson, {
       phase: 'finish',
