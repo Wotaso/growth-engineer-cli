@@ -34,6 +34,8 @@ const DELETE_SECRET = '__OPENCLAW_DELETE_SECRET__';
 const GROWTH_ENGINEER_PACKAGE_SPEC =
   process.env.OPENCLAW_GROWTH_ENGINEER_PACKAGE || '@analyticscli/growth-engineer@preview';
 const RUNTIME_DIR = path.dirname(fileURLToPath(import.meta.url));
+const HEARTBEAT_MARKER_START = '<!-- openclaw-growth-engineer:start -->';
+const HEARTBEAT_MARKER_END = '<!-- openclaw-growth-engineer:end -->';
 const ACCOUNT_SIGNAL_CONNECTOR_KEYS = [
   'stripe',
   'lemonsqueezy',
@@ -922,6 +924,10 @@ function quote(value) {
     return String(value);
   }
   return `'${String(value).replace(/'/g, `'\\''`)}'`;
+}
+
+function escapeRegExp(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 function resolveRuntimeScriptPath(scriptName) {
@@ -4840,6 +4846,7 @@ async function runConnectorSetupSteps({
     if (wroteSecrets) {
       process.stdout.write('Future OpenClaw Growth commands load this secrets file automatically.\n');
     }
+    await maybeRefreshOpenClawSessionInstructions(rl, args.config);
     const configureIsolation = allowIsolationPrompt && ENABLE_ISOLATED_SECRET_RUNNER_WIZARD && await askYesNo(
       rl,
       'Generate an isolated secret runner so OpenClaw can run health checks without reading API keys?',
@@ -5978,6 +5985,80 @@ async function writeOpenClawJobManifest(configPath, config) {
   };
   await writeJsonFile(manifestPath, manifest);
   return manifestPath;
+}
+
+function formatHeartbeatInterval(minutes) {
+  const value = Math.max(1, Number(minutes || DEFAULT_CONNECTOR_HEALTH_INTERVAL_MINUTES));
+  if (value % 1440 === 0) return `${value / 1440}d`;
+  if (value % 60 === 0) return `${value / 60}h`;
+  return `${value}m`;
+}
+
+async function refreshWorkspaceRuntimeFromCurrentWizard() {
+  const scriptsDir = path.resolve('scripts');
+  await fs.mkdir(scriptsDir, { recursive: true });
+  let copied = 0;
+  for (const entry of await fs.readdir(RUNTIME_DIR, { withFileTypes: true })) {
+    if (!entry.isFile()) continue;
+    if (!/\.(mjs|py)$/.test(entry.name)) continue;
+    await fs.copyFile(path.join(RUNTIME_DIR, entry.name), path.join(scriptsDir, entry.name));
+    copied += 1;
+  }
+  return copied;
+}
+
+async function writeOpenClawHeartbeat(configPath, config) {
+  const heartbeatPath = path.resolve('HEARTBEAT.md');
+  const displayConfigPath = path.relative(process.cwd(), path.resolve(configPath)) || configPath;
+  const statePath = deriveStatePathFromConfigPath(displayConfigPath);
+  const interval = formatHeartbeatInterval(config?.schedule?.connectorHealthCheckIntervalMinutes);
+  const runnerCommand = buildGrowthRunnerCommand(displayConfigPath, statePath);
+  const wizardCommand = `npx -y ${GROWTH_ENGINEER_PACKAGE_SPEC} wizard --connectors --config ${displayConfigPath}`;
+  const block = `${HEARTBEAT_MARKER_START}
+tasks:
+
+- name: openclaw-growth-engineer-run
+  interval: ${interval}
+  prompt: "Run \`${runnerCommand}\` from the workspace if the config and runtime files exist. The runner owns schedule.cadences, connectorHealthCheckIntervalMinutes, skipIfNoDataChange, and skipIfIssueSetUnchanged. If asked whether ASC/App Store Connect analytics access is available, do not inspect loaded tools; answer from Growth Engineer status/runner output because ASC is a local CLI/secrets-backed source. If it reports connector-health alerts, production crashes, generated issues, or actionable growth findings, summarize only the action and evidence. If setup files are missing, tell the user to run \`${wizardCommand}\`. If there is no actionable output, reply HEARTBEAT_OK."
+
+# Keep this section small. Do not put secrets in HEARTBEAT.md.
+${HEARTBEAT_MARKER_END}`;
+
+  let existing = '';
+  try {
+    existing = await fs.readFile(heartbeatPath, 'utf8');
+  } catch {
+    existing = '';
+  }
+  const markerPattern = new RegExp(`${escapeRegExp(HEARTBEAT_MARKER_START)}[\\s\\S]*?${escapeRegExp(HEARTBEAT_MARKER_END)}`);
+  const hasWork = existing
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .some((line) => line && !line.startsWith('#') && !line.startsWith('<!--') && !line.startsWith('-->'));
+  const next = markerPattern.test(existing)
+    ? existing.replace(markerPattern, block)
+    : hasWork
+      ? `${existing.trimEnd()}\n\n${block}\n`
+      : `# OpenClaw heartbeat checklist\n\n${block}\n`;
+  if (next !== existing) await fs.writeFile(heartbeatPath, next, 'utf8');
+  return heartbeatPath;
+}
+
+async function maybeRefreshOpenClawSessionInstructions(rl, configPath) {
+  if (isFalseyEnv(process.env.OPENCLAW_GROWTH_REFRESH_OPENCLAW_SESSION)) return false;
+  const refresh = isTruthyEnv(process.env.OPENCLAW_GROWTH_REFRESH_OPENCLAW_SESSION)
+    || await askYesNo(rl, 'Refresh OpenClaw session instructions now?', true);
+  if (!refresh) return false;
+
+  const config = await loadEditableConfig(configPath);
+  const copied = await refreshWorkspaceRuntimeFromCurrentWizard();
+  const heartbeatPath = await writeOpenClawHeartbeat(configPath, config);
+  const manifestPath = await writeOpenClawJobManifest(path.resolve(configPath), config);
+  process.stdout.write(`${ANSI.bold}OpenClaw refresh written.${ANSI.reset}\n`);
+  process.stdout.write(`Runtime files: scripts/ (${copied} files)\n`);
+  process.stdout.write(`Heartbeat: ${path.relative(process.cwd(), heartbeatPath) || heartbeatPath}\n`);
+  process.stdout.write(`Job manifest: ${path.relative(process.cwd(), manifestPath) || manifestPath}\n`);
+  return true;
 }
 
 async function ensureOpenClawCronFromWizard(configPath, config) {
