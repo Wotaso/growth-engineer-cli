@@ -4871,20 +4871,21 @@ async function runConnectorSetupWizard(args) {
 
   const rl = createInterface({ input: process.stdin, output: process.stdout });
   try {
-    const hasExplicitConnectors = Boolean(args.connectors);
     while (true) {
       clearTerminal();
       printConnectorIntro({
         introDetail: 'API keys stay in this host\'s local secrets file. Use Esc/← in menus or type :back in text prompts to return.',
       });
       await migrateRuntimeSourceCommandsFile(args.config);
-      const healthCheckConnectors = await connectorKeysForHealthCheck(args.config);
+      const requestedConnectors = args.connectors ? parseConnectorList(args.connectors) : [];
+      const healthCheckConnectors = requestedConnectors.length > 0
+        ? orderConnectors(requestedConnectors)
+        : await connectorKeysForHealthCheck(args.config);
       const healthByConnector = await withConnectorHealthLoading((onProgress) =>
         getConnectorPickerHealth(args.config, onProgress, healthCheckConnectors),
         healthCheckConnectors,
       );
       const existingFixes = connectorKeysNeedingAttention(healthByConnector);
-      const requestedConnectors = args.connectors ? parseConnectorList(args.connectors) : [];
       let chosenConnectors: ConnectorKey[];
       try {
         chosenConnectors =
@@ -4904,12 +4905,13 @@ async function runConnectorSetupWizard(args) {
       }
 
       try {
-        await runConnectorSetupSteps({ rl, args, selected, healthByConnector });
+        const setupOk = await runConnectorSetupSteps({ rl, args, selected, healthByConnector });
+        if (!setupOk) return 'done';
       } catch (error) {
         if (error instanceof WizardBackError) continue;
         throw error;
       }
-      if (hasExplicitConnectors) return 'done';
+      return 'done';
     }
   } finally {
     rl.close();
@@ -6067,13 +6069,14 @@ async function writeOpenClawHeartbeat(configPath, config) {
   const statePath = deriveStatePathFromConfigPath(displayConfigPath);
   const interval = formatHeartbeatInterval(config?.schedule?.connectorHealthCheckIntervalMinutes);
   const runnerCommand = buildGrowthRunnerCommand(displayConfigPath, statePath);
+  const statusCommand = `node scripts/openclaw-growth-status.mjs --config ${quote(displayConfigPath)} --json --only-connectors asc`;
   const wizardCommand = `npx -y ${GROWTH_ENGINEER_PACKAGE_SPEC} wizard --connectors --config ${displayConfigPath}`;
   const block = `${HEARTBEAT_MARKER_START}
 tasks:
 
 - name: openclaw-growth-engineer-run
   interval: ${interval}
-  prompt: "Run \`${runnerCommand}\` from the workspace if the config and runtime files exist. The runner owns schedule.cadences, connectorHealthCheckIntervalMinutes, skipIfNoDataChange, and skipIfIssueSetUnchanged. If asked whether ASC/App Store Connect analytics access is available, do not inspect loaded tools; answer from Growth Engineer status/runner output because ASC is a local CLI/secrets-backed source. If it reports connector-health alerts, production crashes, generated issues, or actionable growth findings, summarize only the action and evidence. If setup files are missing, tell the user to run \`${wizardCommand}\`. If there is no actionable output, reply HEARTBEAT_OK."
+  prompt: "Run \`${runnerCommand}\` from the workspace if the config and runtime files exist. The runner owns schedule.cadences, connectorHealthCheckIntervalMinutes, skipIfNoDataChange, and skipIfIssueSetUnchanged. If asked whether ASC/App Store Connect analytics access is available, never inspect loaded chat/MCP tools; ASC is not expected to appear as a chat tool. Answer from Growth Engineer status/runner output, or run \`${statusCommand}\`. If ASC reports connected/pass, say ASC analytics is connected through the local asc CLI/API-key setup. If it reports connector-health alerts, production crashes, generated issues, or actionable growth findings, summarize only the action and evidence. If setup files are missing, tell the user to run \`${wizardCommand}\`. If there is no actionable output, reply HEARTBEAT_OK."
 
 # Keep this section small. Do not put secrets in HEARTBEAT.md.
 ${HEARTBEAT_MARKER_END}`;
@@ -6098,20 +6101,49 @@ ${HEARTBEAT_MARKER_END}`;
   return heartbeatPath;
 }
 
+async function writeOpenClawSessionNote(configPath, config) {
+  const notePath = path.resolve('.openclaw/growth-engineer-session.md');
+  const displayConfigPath = path.relative(process.cwd(), path.resolve(configPath)) || configPath;
+  const statePath = deriveStatePathFromConfigPath(displayConfigPath);
+  const runnerCommand = buildGrowthRunnerCommand(displayConfigPath, statePath);
+  const statusCommand = `node scripts/openclaw-growth-status.mjs --config ${quote(displayConfigPath)} --json --only-connectors asc`;
+  const enabledConnectors = configuredConnectorKeysFromConfig(config).map((key) => connectorLabel(key));
+  const lines = [
+    '# Growth Engineer Session Context',
+    '',
+    'Use this file as local OpenClaw context after connector setup changes.',
+    '',
+    '- ASC/App Store Connect is a local CLI/API-key connector, not a chat/MCP tool.',
+    '- Do not answer ASC availability by listing loaded tools.',
+    `- Check ASC status with: \`${statusCommand}\``,
+    `- Run Growth Engineer with: \`${runnerCommand}\``,
+    enabledConnectors.length > 0
+      ? `- Configured connector groups: ${enabledConnectors.join(', ')}`
+      : '- Configured connector groups: none yet',
+    '',
+  ];
+  await ensureDirForFile(notePath);
+  await fs.writeFile(notePath, `${lines.join('\n')}\n`, 'utf8');
+  return notePath;
+}
+
 async function maybeRefreshOpenClawSessionInstructions(rl, configPath) {
   if (isFalseyEnv(process.env.OPENCLAW_GROWTH_REFRESH_OPENCLAW_SESSION)) return false;
   const refresh = isTruthyEnv(process.env.OPENCLAW_GROWTH_REFRESH_OPENCLAW_SESSION)
-    || await askYesNo(rl, 'Refresh OpenClaw session instructions now?', true);
+    || await askYesNo(rl, 'Update OpenClaw runtime and heartbeat files now?', true);
   if (!refresh) return false;
 
   const config = await loadEditableConfig(configPath);
   const copied = await refreshWorkspaceRuntimeFromCurrentWizard();
   const heartbeatPath = await writeOpenClawHeartbeat(configPath, config);
   const manifestPath = await writeOpenClawJobManifest(path.resolve(configPath), config);
-  process.stdout.write(`${ANSI.bold}OpenClaw refresh written.${ANSI.reset}\n`);
+  const sessionNotePath = await writeOpenClawSessionNote(configPath, config);
+  process.stdout.write(`${ANSI.bold}OpenClaw files updated.${ANSI.reset}\n`);
   process.stdout.write(`Runtime files: scripts/ (${copied} files)\n`);
   process.stdout.write(`Heartbeat: ${path.relative(process.cwd(), heartbeatPath) || heartbeatPath}\n`);
   process.stdout.write(`Job manifest: ${path.relative(process.cwd(), manifestPath) || manifestPath}\n`);
+  process.stdout.write(`Session note: ${path.relative(process.cwd(), sessionNotePath) || sessionNotePath}\n`);
+  process.stdout.write('ASC will not appear as a chat tool; OpenClaw should answer ASC access from Growth Engineer status.\n');
   return true;
 }
 
