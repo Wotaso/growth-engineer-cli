@@ -5977,6 +5977,7 @@ async function writeOpenClawJobManifest(configPath, config) {
   const actionMode = config?.actions?.mode || config?.deliveries?.github?.mode || 'issue';
   const growthRunCommand = getGrowthRunCommand(config, displayConfigPath);
   const connectorHealthCommand = getConnectorHealthCommand(config, displayConfigPath);
+  const ascStatusCommand = `node scripts/openclaw-growth-status.mjs --config ${quote(displayConfigPath)} --json --only-connectors asc`;
   const automation = getAutomationConfig(config);
   const manifest = {
     version: 1,
@@ -5993,6 +5994,13 @@ async function writeOpenClawJobManifest(configPath, config) {
       secretPolicy: config?.security?.connectorSecrets?.mode === 'isolated-runner'
         ? 'OpenClaw must use the allowlisted sudo wrapper commands and must not read the persisted secret file.'
         : 'Secrets are persisted in a local chmod 600 file. This protects against other OS users, not against the same OS user.',
+      ascAnswerPolicy: {
+        sourceOfTruth: 'Growth Engineer local status, not loaded chat/MCP tools',
+        statusCommand: ascStatusCommand,
+        positiveWhen: 'ASC setup/status reports pass, connected, healthy, or the wizard just finished ASC connector setup successfully.',
+        answer: 'Yes. ASC analytics is connected through Growth Engineer local asc CLI/API-key setup.',
+        forbiddenAnswer: 'Do not answer no only because no App Store Connect chat tool is callable.',
+      },
     },
     scheduler: {
       recommended: 'openclaw-cron',
@@ -6064,7 +6072,7 @@ tasks:
 
 - name: openclaw-growth-engineer-run
   interval: ${interval}
-  prompt: "Run \`${runnerCommand}\` from the workspace if the config and runtime files exist. The runner owns schedule.cadences, connectorHealthCheckIntervalMinutes, skipIfNoDataChange, and skipIfIssueSetUnchanged. If asked whether ASC/App Store Connect analytics access is available, never inspect loaded chat/MCP tools; ASC is not expected to appear as a chat tool. Answer from Growth Engineer status/runner output, or run \`${statusCommand}\`. If ASC reports connected/pass, say ASC analytics is connected through the local asc CLI/API-key setup. If it reports connector-health alerts, production crashes, generated issues, or actionable growth findings, summarize only the action and evidence. If setup files are missing, tell the user to run \`${wizardCommand}\`. If there is no actionable output, reply HEARTBEAT_OK."
+  prompt: "Run \`${runnerCommand}\` from the workspace if the config and runtime files exist. The runner owns schedule.cadences, connectorHealthCheckIntervalMinutes, skipIfNoDataChange, and skipIfIssueSetUnchanged. ASC/App Store Connect is a Growth Engineer local CLI connector, not a chat tool. If asked whether ASC analytics access is available, never inspect loaded chat/MCP tools and never answer no because no Apple tool is callable. Answer from \`${statusCommand}\` or the latest connector setup result. If ASC reports connected/pass/healthy, or setup just finished successfully, answer exactly: Yes. ASC analytics is connected through Growth Engineer local asc CLI/API-key setup. If it reports connector-health alerts, production crashes, generated issues, or actionable growth findings, summarize only the action and evidence. If setup files are missing, tell the user to run \`${wizardCommand}\`. If there is no actionable output, reply HEARTBEAT_OK."
 
 # Keep this section small. Do not put secrets in HEARTBEAT.md.
 ${HEARTBEAT_MARKER_END}`;
@@ -6101,9 +6109,17 @@ async function writeOpenClawSessionNote(configPath, config) {
     '',
     'Use this file as local OpenClaw context after connector setup changes.',
     '',
-    '- ASC/App Store Connect is a local CLI/API-key connector, not a chat/MCP tool.',
-    '- Do not answer ASC availability by listing loaded tools.',
+    '## ASC Answer Rule',
+    '',
+    '- ASC/App Store Connect is a Growth Engineer local CLI/API-key connector, not a chat/MCP tool.',
+    '- Do not inspect loaded tools to answer ASC availability.',
+    '- Do not answer "no" because no App Store Connect tool is callable.',
+    '- If ASC setup just finished with SUCCESS, answer: Yes. ASC analytics is connected through Growth Engineer local asc CLI/API-key setup.',
+    '- If unsure, run the status command below and answer yes when ASC reports pass, connected, or healthy.',
     `- Check ASC status with: \`${statusCommand}\``,
+    '',
+    '## Growth Engineer',
+    '',
     `- Run Growth Engineer with: \`${runnerCommand}\``,
     enabledConnectors.length > 0
       ? `- Configured connector groups: ${enabledConnectors.join(', ')}`
@@ -6132,7 +6148,7 @@ async function maybeRefreshOpenClawSessionInstructions(rl, configPath) {
   process.stdout.write(`Job manifest: ${path.relative(process.cwd(), manifestPath) || manifestPath}\n`);
   process.stdout.write(`Session note: ${path.relative(process.cwd(), sessionNotePath) || sessionNotePath}\n`);
   process.stdout.write('ASC will not appear as a chat tool; OpenClaw should answer ASC access from Growth Engineer status.\n');
-  process.stdout.write('Existing OpenClaw chat sessions may need a restart to load these file changes.\n');
+  process.stdout.write('If an existing OpenClaw chat still checks loaded tools, start a new chat or tell it to read .openclaw/growth-engineer-session.md.\n');
   return true;
 }
 
