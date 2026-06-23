@@ -305,6 +305,12 @@ function extractAscAnalyticsRequestIds(payload) {
   return [...new Set(ids)];
 }
 
+function isAscAnalyticsRequestCollectionUnsupported(error) {
+  const normalized = normalizeString(error).toLowerCase();
+  return normalized.includes("does not allow 'get_collection'") ||
+    normalized.includes('allowed operations are: create, delete, get_instance');
+}
+
 async function runPreflight(configPath, timeoutMs, progressJson = false, onlyConnectors: string[] = []) {
   const command = [
     nodeRuntimeScriptCommand('openclaw-growth-preflight.mjs'),
@@ -425,22 +431,48 @@ async function checkAscAnalyticsReadiness(timeoutMs) {
     const result = await runShell(`asc analytics requests --app ${quote(appId)} --output json`, {
       timeoutMs: Math.max(5_000, timeoutMs),
     });
+    const error = result.ok ? null : normalizeString(result.stderr) || `exit ${result.code}`;
+    const collectionUnsupported = !result.ok && isAscAnalyticsRequestCollectionUnsupported(error);
     const ids = result.ok ? extractAscAnalyticsRequestIds(parseJsonFromStdout(result.stdout)) : [];
     results.push({
       appId,
-      ok: result.ok,
+      ok: result.ok || collectionUnsupported,
+      collectionUnsupported,
       requestCount: ids.length,
-      error: result.ok ? null : normalizeString(result.stderr) || `exit ${result.code}`,
+      error: collectionUnsupported ? null : error,
     });
   }
 
   const failed = results.filter((result) => !result.ok);
   const appsWithRequests = results.filter((result) => result.requestCount > 0);
+  const collectionUnsupportedCount = results.filter((result) => result.collectionUnsupported).length;
   const requestCount = results.reduce((sum, result) => sum + Number(result.requestCount || 0), 0);
   if (failed.length > 0) {
     return {
       status: 'blocked',
       detail: `ASC App Analytics report requests could not be queried for ${failed.length}/${results.length} checked app(s): ${failed[0].error}`,
+      vendorNumber,
+      appCount: appIds.length,
+      checkedAppCount: results.length,
+      requestCount,
+      results,
+    };
+  }
+  if (collectionUnsupportedCount > 0) {
+    if (!vendorNumber) {
+      return {
+        status: 'partial',
+        detail: `ASC API auth and app access are available for ${results.length} checked app(s), but ASC_VENDOR_NUMBER is missing for Sales and Trends/App Units`,
+        vendorNumber,
+        appCount: appIds.length,
+        checkedAppCount: results.length,
+        requestCount,
+        results,
+      };
+    }
+    return {
+      status: 'connected',
+      detail: `ASC API auth, app access, and ASC_VENDOR_NUMBER are available for ${results.length} checked app(s); Apple does not allow app-scoped request listing, so setup verifies existing requests through create/duplicate handling`,
       vendorNumber,
       appCount: appIds.length,
       checkedAppCount: results.length,
