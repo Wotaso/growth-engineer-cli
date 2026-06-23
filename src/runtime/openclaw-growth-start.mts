@@ -321,6 +321,23 @@ function normalizeSourceCommand(sourceName, source) {
   return replaceLegacyRuntimeScriptCommand(source?.command || '') || getRuntimeSourceCommand(sourceName);
 }
 
+function isAscSource(source: any) {
+  const service = String(source?.service || source?.key || '').trim().toLowerCase();
+  return ['asc', 'asc-cli', 'app-store-connect', 'app_store_connect'].includes(service);
+}
+
+function buildAscExtraSource(source: any = {}) {
+  return {
+    key: 'asc-cli',
+    service: 'asc-cli',
+    label: source?.label || 'ASC / App Store Connect CLI',
+    enabled: true,
+    mode: 'command',
+    ...source,
+    command: normalizeSourceCommand('asc', source),
+  };
+}
+
 function migrateRuntimeSourceCommands(config) {
   if (!config || typeof config !== 'object') return config;
   const sources = config.sources && typeof config.sources === 'object' ? config.sources : {};
@@ -337,9 +354,7 @@ function migrateRuntimeSourceCommands(config) {
     nextSources.extra = nextSources.extra.map((source) => {
       if (!source || source.mode !== 'command') return source;
       const service = String(source.service || source.key || '').toLowerCase();
-      const sourceName = ['asc', 'asc-cli', 'app-store-connect', 'app_store_connect'].includes(service)
-        ? 'asc'
-        : service;
+      const sourceName = isAscSource(source) ? 'asc' : service;
       return {
         ...source,
         command: normalizeSourceCommand(sourceName, source),
@@ -1365,6 +1380,7 @@ async function enableConnectorConfig(configPath, connectors) {
   if (connectors.length === 0 || !(await fileExists(configPath))) return;
   const config = await readJson(configPath);
   const extra = Array.isArray(config.sources?.extra) ? config.sources.extra : [];
+  const hasAscExtra = extra.some(isAscSource);
   const next = {
     ...config,
     sources: {
@@ -1395,12 +1411,12 @@ async function enableConnectorConfig(configPath, connectors) {
           }
         : config.sources?.coolify,
       extra: extra.map((source) =>
-        connectors.includes('asc') && source?.service === 'asc-cli'
-          ? { ...source, enabled: true, mode: 'command', command: normalizeSourceCommand('asc', source) }
+        connectors.includes('asc') && isAscSource(source)
+          ? buildAscExtraSource(source)
           : connectors.includes(String(source?.key || source?.service || '')) && isAccountSignalConnector(String(source?.key || source?.service || ''))
             ? { ...source, enabled: true, mode: source.mode || 'file' }
           : source,
-      ),
+      ).concat(connectors.includes('asc') && !hasAscExtra ? [buildAscExtraSource()] : []),
     },
   };
   await writeJson(configPath, next);
@@ -1727,11 +1743,11 @@ async function configureAscAllApps(configPath) {
 }
 
 function configHasEnabledAscSource(config) {
+  if (config?.sources?.asc && config.sources.asc.enabled !== false) return true;
   const extraSources = Array.isArray(config?.sources?.extra) ? config.sources.extra : [];
   return extraSources.some((source) => {
     if (!source || typeof source !== 'object' || source.enabled === false) return false;
-    const service = String(source.service || source.key || '').trim().toLowerCase();
-    return ['asc', 'asc-cli', 'app-store-connect', 'app_store_connect'].includes(service);
+    return isAscSource(source);
   });
 }
 

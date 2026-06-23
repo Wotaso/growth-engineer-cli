@@ -188,6 +188,18 @@ function connector(status, detail, extra: Record<string, unknown> = {}) {
   };
 }
 
+function isAscSource(source: any) {
+  const service = String(source?.service || source?.key || '').trim().toLowerCase();
+  return ['asc', 'asc-cli', 'app-store-connect', 'app_store_connect'].includes(service);
+}
+
+function configHasEnabledAscSource(config: any) {
+  if (config?.sources?.asc && config.sources.asc.enabled !== false) return true;
+  return (Array.isArray(config?.sources?.extra) ? config.sources.extra : []).some(
+    (source) => isAscSource(source) && source?.enabled !== false,
+  );
+}
+
 function getSentryAccountMetadata(config) {
   const sentrySource = config?.sources?.sentry || {};
   const configured = Array.isArray(sentrySource.accounts) ? sentrySource.accounts : [];
@@ -575,10 +587,7 @@ function summarizeCoolify(preflight, config) {
 async function summarizeAsc(preflight, config, timeoutMs) {
   const ascSources = checksByPrefix(preflight, 'connection:asc_cli');
   const ascConnection = ascSources[0] || null;
-  const ascConfigured = (Array.isArray(config?.sources?.extra) ? config.sources.extra : []).some(
-    (source) => source?.service === 'asc-cli' && source.enabled !== false,
-  );
-  if (!ascConfigured) {
+  if (!configHasEnabledAscSource(config)) {
     return connector('not_enabled', 'App Store Connect CLI source is disabled');
   }
   if (ascConnection?.status === 'pass') {
