@@ -841,9 +841,36 @@ export function buildAscSummary(input) {
     crashBreakdown.reduce((sum, entry) => sum + (coerceNumber(entry?.value) || 0), 0);
   const analyticsWarnings = Array.isArray(input?.analyticsWarnings) ? input.analyticsWarnings : [];
   const batchReports = Array.isArray(input?.batchReports) ? input.batchReports : [];
-  const analyticsAvailability = analyticsWarnings.some((warning) => String(warning).includes('403'))
-    ? 'not_public_or_not_analytics_ready'
-    : analyticsMetricsPayload || unitsMetric || conversionRateMetric || sourceBreakdown.length > 0 || totalCrashes > 0 || batchReports.length > 0
+  const analyticsWarningText = analyticsWarnings.map((warning) => String(warning)).join('\n').toLowerCase();
+  const analyticsAuthBlocked =
+    analyticsWarningText.includes('forbidden for security') ||
+    analyticsWarningText.includes('api key in use does not allow this request') ||
+    analyticsWarningText.includes('does not allow this request') ||
+    analyticsWarningText.includes('403') ||
+    analyticsWarningText.includes('forbidden');
+  const analyticsTemporarilyUnavailable =
+    analyticsWarningText.includes('timed out after') ||
+    analyticsWarningText.includes('temporarily unavailable') ||
+    analyticsWarningText.includes('unexpected error occurred') ||
+    analyticsWarningText.includes('fetch failed') ||
+    analyticsWarningText.includes('network timeout');
+  const hasAnalyticsData = Boolean(
+    analyticsMetricsPayload ||
+    unitsMetric ||
+    conversionRateMetric ||
+    sourceBreakdown.length > 0 ||
+    totalCrashes > 0 ||
+    batchReports.length > 0,
+  );
+  const analyticsAvailability = analyticsAuthBlocked
+    ? hasAnalyticsData
+      ? 'partial_auth_blocked'
+      : 'auth_blocked'
+    : analyticsTemporarilyUnavailable
+      ? hasAnalyticsData
+        ? 'partial_temporarily_unavailable'
+        : 'temporarily_unavailable'
+    : hasAnalyticsData
       ? 'available'
       : 'unknown';
   const overviewMetricCatalog = mergeMetricCatalogs(

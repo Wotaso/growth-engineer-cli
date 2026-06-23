@@ -11,7 +11,6 @@ import { buildAscSummary, writeJsonOutput } from './openclaw-exporters-lib.mjs';
 import { loadOpenClawGrowthSecrets } from './openclaw-growth-env.mjs';
 
 const gunzipAsync = promisify(gunzip);
-const DEFAULT_ASC_TIMEOUT_SECONDS = '120';
 
 function printHelpAndExit(exitCode, reason = null) {
   if (reason) {
@@ -36,6 +35,7 @@ Options:
   --reviews-limit <n>    Review summarizations limit (default: 20)
   --feedback-limit <n>   TestFlight feedback limit (default: 20)
   --analytics-instance-limit <n> Maximum App Analytics report instances to download (default: 8)
+  --command-timeout-ms <n> Maximum time for each asc command (default: 45000)
   --max-signals <n>      Maximum signals to emit (default: 4)
   --help, -h             Show help
 `);
@@ -56,6 +56,7 @@ function parseArgs(argv) {
     reviewsLimit: 20,
     feedbackLimit: 20,
     analyticsInstanceLimit: 8,
+    commandTimeoutMs: Number.parseInt(String(process.env.ASC_EXPORT_COMMAND_TIMEOUT_MS || '45000'), 10),
     maxSignals: 4,
   };
 
@@ -106,6 +107,13 @@ function parseArgs(argv) {
       }
       args.analyticsInstanceLimit = parsed;
       index += 1;
+    } else if (token === '--command-timeout-ms') {
+      const parsed = Number.parseInt(String(next || ''), 10);
+      if (!Number.isFinite(parsed) || parsed < 1000) {
+        printHelpAndExit(1, `Invalid value for --command-timeout-ms: ${String(next || '')}`);
+      }
+      args.commandTimeoutMs = parsed;
+      index += 1;
     } else if (token === '--max-signals') {
       const parsed = Number.parseInt(String(next || ''), 10);
       if (!Number.isFinite(parsed) || parsed <= 0) {
@@ -137,22 +145,37 @@ function formatDate(date) {
   return date.toISOString().slice(0, 10);
 }
 
-function ascCommandEnv(): NodeJS.ProcessEnv {
-  return {
-    ...process.env,
-    ASC_TIMEOUT_SECONDS: normalizeString(process.env.ASC_TIMEOUT_SECONDS) || DEFAULT_ASC_TIMEOUT_SECONDS,
-  };
+function ascCommandEnv(overrides: Record<string, string> = {}): NodeJS.ProcessEnv {
+  const env = { ...process.env, ...overrides };
+  delete env.ASC_TIMEOUT;
+  delete env.ASC_TIMEOUT_SECONDS;
+  delete env.ASC_VENDOR_NUMBER;
+  return env;
 }
 
-function runJsonCommand(command, commandArgs) {
+function runJsonCommand(command, commandArgs, options: { timeoutMs?: number; env?: Record<string, string> } = {}) {
+  const timeoutMs = Number.isFinite(Number(options.timeoutMs)) ? Number(options.timeoutMs) : 45_000;
   return new Promise((resolve, reject) => {
     const child = spawn(command, commandArgs, {
       stdio: ['ignore', 'pipe', 'pipe'],
-      env: ascCommandEnv(),
+      env: ascCommandEnv(options.env || {}),
     });
 
     let stdout = '';
     let stderr = '';
+    let timedOut = false;
+    let settled = false;
+    let forceKillTimeout: NodeJS.Timeout | null = null;
+    const timeout = setTimeout(() => {
+      timedOut = true;
+      child.kill('SIGTERM');
+      forceKillTimeout = setTimeout(() => {
+        if (settled) return;
+        child.kill('SIGKILL');
+        settled = true;
+        reject(new Error(`${command} ${commandArgs.join(' ')} timed out after ${timeoutMs}ms`));
+      }, 2_000);
+    }, timeoutMs);
 
     child.stdout.on('data', (chunk) => {
       stdout += String(chunk);
@@ -160,8 +183,22 @@ function runJsonCommand(command, commandArgs) {
     child.stderr.on('data', (chunk) => {
       stderr += String(chunk);
     });
-    child.on('error', reject);
+    child.on('error', (error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      if (forceKillTimeout) clearTimeout(forceKillTimeout);
+      reject(error);
+    });
     child.on('close', (code) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      if (forceKillTimeout) clearTimeout(forceKillTimeout);
+      if (timedOut) {
+        reject(new Error(`${command} ${commandArgs.join(' ')} timed out after ${timeoutMs}ms`));
+        return;
+      }
       if (code !== 0) {
         reject(Object.assign(new Error(stderr.trim() || `${command} exited with code ${code}`), { exitCode: code }));
         return;
@@ -176,13 +213,102 @@ function runJsonCommand(command, commandArgs) {
   });
 }
 
-async function runBestEffortAscQuery(label, args, warnings) {
-  try {
-    return await runJsonCommand('asc', args);
-  } catch (error) {
-    warnings.push(`${label}: ${error instanceof Error ? error.message : String(error)}`);
-    return null;
+function envValue(name) {
+  return normalizeString(process.env[name]);
+}
+
+function getAscAnalyticsFallbackEnv() {
+  const candidates = [
+    {
+      label: 'ASC_ANALYTICS',
+      keyId: envValue('ASC_ANALYTICS_KEY_ID'),
+      issuerId: envValue('ASC_ANALYTICS_ISSUER_ID'),
+      privateKeyPath: envValue('ASC_ANALYTICS_PRIVATE_KEY_PATH'),
+      privateKey: envValue('ASC_ANALYTICS_PRIVATE_KEY'),
+      privateKeyB64: envValue('ASC_ANALYTICS_PRIVATE_KEY_B64'),
+    },
+    {
+      label: 'ASC_ADMIN',
+      keyId: envValue('ASC_ADMIN_KEY_ID'),
+      issuerId: envValue('ASC_ADMIN_ISSUER_ID'),
+      privateKeyPath: envValue('ASC_ADMIN_PRIVATE_KEY_PATH'),
+      privateKey: envValue('ASC_ADMIN_PRIVATE_KEY'),
+      privateKeyB64: envValue('ASC_ADMIN_PRIVATE_KEY_B64'),
+    },
+    {
+      label: 'ASC_BOOTSTRAP',
+      keyId: envValue('ASC_BOOTSTRAP_KEY_ID'),
+      issuerId: envValue('ASC_BOOTSTRAP_ISSUER_ID'),
+      privateKeyPath: envValue('ASC_BOOTSTRAP_PRIVATE_KEY_PATH'),
+      privateKey: envValue('ASC_BOOTSTRAP_PRIVATE_KEY'),
+      privateKeyB64: envValue('ASC_BOOTSTRAP_PRIVATE_KEY_B64'),
+    },
+  ];
+  for (const candidate of candidates) {
+    if (!candidate.keyId || !candidate.issuerId || (!candidate.privateKeyPath && !candidate.privateKey && !candidate.privateKeyB64)) continue;
+    return {
+      label: candidate.label,
+      env: {
+        ASC_BYPASS_KEYCHAIN: '1',
+        ASC_KEY_ID: candidate.keyId,
+        ASC_ISSUER_ID: candidate.issuerId,
+        ...(candidate.privateKeyPath ? { ASC_PRIVATE_KEY_PATH: candidate.privateKeyPath } : {}),
+        ...(candidate.privateKey ? { ASC_PRIVATE_KEY: candidate.privateKey } : {}),
+        ...(candidate.privateKeyB64 ? { ASC_PRIVATE_KEY_B64: candidate.privateKeyB64 } : {}),
+      },
+    };
   }
+  return null;
+}
+
+function isAscAnalyticsAuthBlockedMessage(value) {
+  const normalized = String(value || '').toLowerCase();
+  return normalized.includes('forbidden for security') ||
+    normalized.includes('api key in use does not allow this request') ||
+    normalized.includes('does not allow this request') ||
+    normalized.includes('403') ||
+    normalized.includes('forbidden');
+}
+
+function isAscAnalyticsTemporarilyUnavailableMessage(value) {
+  const normalized = String(value || '').toLowerCase();
+  return normalized.includes('timed out after') ||
+    normalized.includes('unexpected error occurred') ||
+    normalized.includes('fetch failed') ||
+    normalized.includes('network timeout') ||
+    normalized.includes('econnreset') ||
+    normalized.includes('etimedout') ||
+    normalized.includes('eai_again') ||
+    normalized.includes('enotfound');
+}
+
+async function runBestEffortAscQueryResult(label, args, warnings, options: { timeoutMs?: number; env?: Record<string, string>; retryWithAnalyticsFallback?: boolean } = {}) {
+  try {
+    return { ok: true, payload: await runJsonCommand('asc', args, options), error: null };
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    if (options.retryWithAnalyticsFallback && isAscAnalyticsAuthBlockedMessage(detail)) {
+      const fallback = getAscAnalyticsFallbackEnv();
+      if (fallback) {
+        try {
+          const payload = await runJsonCommand('asc', args, { ...options, env: { ...(options.env || {}), ...fallback.env } });
+          warnings.push(`${label}: retried with ${fallback.label} key`);
+          return { ok: true, payload, error: null };
+        } catch (fallbackError) {
+          const fallbackDetail = fallbackError instanceof Error ? fallbackError.message : String(fallbackError);
+          warnings.push(`${label}: ${detail}; ${fallback.label} retry also failed: ${fallbackDetail}`);
+          return { ok: false, payload: null, error: fallbackDetail };
+        }
+      }
+    }
+    warnings.push(`${label}: ${detail}`);
+    return { ok: false, payload: null, error: detail };
+  }
+}
+
+async function runBestEffortAscQuery(label, args, warnings, options: { timeoutMs?: number; env?: Record<string, string>; retryWithAnalyticsFallback?: boolean } = {}) {
+  const result = await runBestEffortAscQueryResult(label, args, warnings, options);
+  return result.payload;
 }
 
 function normalizeString(value) {
@@ -549,7 +675,7 @@ async function downloadAndParseReport(label, commandArgs, appCacheDir, baseName,
 
   try {
     await fs.mkdir(appCacheDir, { recursive: true });
-    await runJsonCommand('asc', [...commandArgs, '--output', paths.rawPath]);
+    await runJsonCommand('asc', [...commandArgs, '--output', paths.rawPath], { timeoutMs: args.commandTimeoutMs });
     await materializeParsedReport(paths.rawPath, paths.parsedPath);
     const rows = await parseDelimitedReport(paths.parsedPath);
     const report = { label, outputPath: paths.parsedPath, rows, cacheStatus: 'downloaded' };
@@ -557,8 +683,25 @@ async function downloadAndParseReport(label, commandArgs, appCacheDir, baseName,
     return report;
   } catch (error) {
     const compressedError = error instanceof Error ? error.message : String(error);
+    const analyticsFallback = isAscAnalyticsAuthBlockedMessage(compressedError) ? getAscAnalyticsFallbackEnv() : null;
+    if (analyticsFallback) {
+      try {
+        await runJsonCommand('asc', [...commandArgs, '--output', paths.rawPath], {
+          timeoutMs: args.commandTimeoutMs,
+          env: analyticsFallback.env,
+        });
+        await materializeParsedReport(paths.rawPath, paths.parsedPath);
+        const rows = await parseDelimitedReport(paths.parsedPath);
+        const report = { label, outputPath: paths.parsedPath, rows, cacheStatus: `downloaded_${analyticsFallback.label.toLowerCase()}` };
+        await writeReportManifest(paths, report);
+        warnings.push(`${label}: retried with ${analyticsFallback.label} key`);
+        return report;
+      } catch (fallbackKeyError) {
+        warnings.push(`${label}: ${analyticsFallback.label} retry failed: ${fallbackKeyError instanceof Error ? fallbackKeyError.message : String(fallbackKeyError)}`);
+      }
+    }
     try {
-      await runJsonCommand('asc', [...commandArgs, '--output', paths.parsedPath, '--decompress']);
+      await runJsonCommand('asc', [...commandArgs, '--output', paths.parsedPath, '--decompress'], { timeoutMs: args.commandTimeoutMs });
       const rows = await parseDelimitedReport(paths.parsedPath);
       const report = { label, outputPath: paths.parsedPath, rows, cacheStatus: 'downloaded_decompressed' };
       await writeReportManifest(paths, report);
@@ -606,17 +749,26 @@ async function downloadBatchAnalyticsReports(appId, args, warnings) {
     if (sales) reports.push(sales);
   }
 
-  const requestsPayload = await runBestEffortAscQuery('ASC analytics requests query', [
+  const requestsResult = await runBestEffortAscQueryResult('ASC analytics requests query', [
     'analytics',
     'requests',
     '--app',
     appId,
     '--output',
     'json',
-  ], warnings);
+  ], warnings, { timeoutMs: args.commandTimeoutMs, retryWithAnalyticsFallback: true });
+  const requestsPayload = requestsResult.payload;
   let requestId = extractItems(requestsPayload).map(extractId).find(Boolean);
   if (!requestId) {
-    const createdRequest = await runBestEffortAscQuery('ASC analytics ongoing request creation', [
+    if (!requestsResult.ok && isAscAnalyticsAuthBlockedMessage(requestsResult.error)) {
+      warnings.push('ASC App Analytics batch report: API key can list apps but cannot read App Analytics report requests; Sales and Trends data remains available when ASC_VENDOR_NUMBER is set');
+      return reports.length > 0 ? reports : loadLatestCachedReports(appCacheRoot, args.end, warnings);
+    }
+    if (!requestsResult.ok && isAscAnalyticsTemporarilyUnavailableMessage(requestsResult.error)) {
+      warnings.push('ASC App Analytics batch report: request listing is temporarily unavailable; skipped request creation and will retry later');
+      return reports.length > 0 ? reports : loadLatestCachedReports(appCacheRoot, args.end, warnings);
+    }
+    const createdRequestResult = await runBestEffortAscQueryResult('ASC analytics ongoing request creation', [
       'analytics',
       'request',
       '--app',
@@ -625,13 +777,18 @@ async function downloadBatchAnalyticsReports(appId, args, warnings) {
       'ONGOING',
       '--output',
       'json',
-    ], warnings);
+    ], warnings, { timeoutMs: args.commandTimeoutMs, retryWithAnalyticsFallback: true });
+    const createdRequest = createdRequestResult.payload;
     const createdRequestId = extractId(createdRequest) || extractItems(createdRequest).map(extractId).find(Boolean);
-    warnings.push(
-      createdRequestId
-        ? `ASC App Analytics batch report: created ongoing analytics request ${createdRequestId}; report instances will be available after Apple finishes processing`
-        : 'ASC App Analytics batch report: requested ongoing analytics access; report instances will be available after Apple finishes processing',
-    );
+    if (createdRequestId || createdRequestResult.ok) {
+      warnings.push(
+        createdRequestId
+          ? `ASC App Analytics batch report: created ongoing analytics request ${createdRequestId}; report instances will be available after Apple finishes processing`
+          : 'ASC App Analytics batch report: requested ongoing analytics access; report instances will be available after Apple finishes processing',
+      );
+    } else if (isAscAnalyticsAuthBlockedMessage(createdRequestResult.error)) {
+      warnings.push('ASC App Analytics batch report: API key cannot create/read App Analytics report requests; use an Admin setup key once to create requests, then rerun with the Reports key');
+    }
     return reports.length > 0 ? reports : loadLatestCachedReports(appCacheRoot, args.end, warnings);
   }
 
@@ -646,7 +803,7 @@ async function downloadBatchAnalyticsReports(appId, args, warnings) {
     '--paginate',
     '--output',
     'json',
-  ], warnings);
+  ], warnings, { timeoutMs: args.commandTimeoutMs, retryWithAnalyticsFallback: true });
   const instances = extractInstances(viewPayload).slice(0, Math.max(1, Number(args.analyticsInstanceLimit) || 8));
   if (instances.length === 0) {
     warnings.push(`ASC App Analytics batch report: request ${requestId} has no downloadable instances for ${args.end}`);
@@ -717,46 +874,59 @@ async function listAscApps() {
 
 async function buildSingleAppSummary(appId, args) {
   const warnings = [];
-  const statusPayload = await runBestEffortAscQuery('ASC status query', [
-    'status',
-    '--app',
-    appId,
-    '--include',
-    'builds,testflight,submission,review,appstore',
-  ], warnings);
-
   const ratingsArgs = ['reviews', 'ratings', '--app', appId];
   if (args.country) {
     ratingsArgs.push('--country', args.country);
   } else {
     ratingsArgs.push('--all');
   }
-  const ratingsPayload = await runBestEffortAscQuery('ASC ratings query', ratingsArgs, warnings);
 
-  const reviewSummariesPayload = await runBestEffortAscQuery('ASC review summarizations query', [
-    'reviews',
-    'summarizations',
-    '--app',
-    appId,
-    '--platform',
-    'IOS',
-    '--limit',
-    String(args.reviewsLimit),
-    '--fields',
-    'text,createdDate,locale',
-  ], warnings);
-
-  const feedbackPayload = await runBestEffortAscQuery('ASC beta feedback query', [
-    'feedback',
-    '--app',
-    appId,
-    '--limit',
-    String(args.feedbackLimit),
-    '--sort',
-    '-createdDate',
-    ], warnings);
-
-  const batchReports = await downloadBatchAnalyticsReports(appId, args, warnings);
+  const [
+    statusPayload,
+    ratingsPayload,
+    reviewSummariesPayload,
+    feedbackPayload,
+    batchReports,
+  ] = await Promise.all([
+    runBestEffortAscQuery('ASC status query', [
+      'status',
+      '--app',
+      appId,
+      '--include',
+      'builds,testflight,submission,review,appstore',
+      '--output',
+      'json',
+    ], warnings, { timeoutMs: args.commandTimeoutMs }),
+    runBestEffortAscQuery('ASC ratings query', ratingsArgs, warnings, { timeoutMs: args.commandTimeoutMs }),
+    runBestEffortAscQuery('ASC review summarizations query', [
+      'reviews',
+      'summarizations',
+      '--app',
+      appId,
+      '--platform',
+      'IOS',
+      '--limit',
+      String(args.reviewsLimit),
+      '--fields',
+      'text,createdDate,locale',
+      '--output',
+      'json',
+    ], warnings, { timeoutMs: args.commandTimeoutMs }),
+    runBestEffortAscQuery('ASC beta feedback query', [
+      'testflight',
+      'feedback',
+      'list',
+      '--app',
+      appId,
+      '--limit',
+      String(args.feedbackLimit),
+      '--sort',
+      '-createdDate',
+      '--output',
+      'json',
+    ], warnings, { timeoutMs: args.commandTimeoutMs }),
+    downloadBatchAnalyticsReports(appId, args, warnings),
+  ]);
   const batchRows = batchReports.flatMap((report) => report.rows);
   const batchAnalyticsPayload = batchRows.length > 0 ? summarizeBatchRows(batchRows, appId) : null;
 
