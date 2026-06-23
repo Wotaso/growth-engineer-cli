@@ -24,7 +24,6 @@ import {
 import { loadOpenClawGrowthSecrets } from './openclaw-growth-env.mjs';
 
 const DEFAULT_CONFIG_PATH = 'data/openclaw-growth-engineer/config.json';
-const SELF_UPDATE_INTERVAL_MS = 24 * 60 * 60 * 1000;
 const SELF_UPDATE_SKILL_SLUG_CANDIDATES = ['growth-engineer', 'openclaw-growth-engineer'];
 const ENABLE_ISOLATED_SECRET_RUNNER_WIZARD = false;
 const DEFAULT_GROWTH_INTERVAL_MINUTES = 90;
@@ -4470,14 +4469,6 @@ function printAscBootstrapAdminRevokeNotice(bootstrapEnv: Record<string, string>
   process.stdout.write('https://appstoreconnect.apple.com/access/integrations/api\n');
 }
 
-async function shouldRunSelfUpdate(workspaceRoot, force) {
-  if (force) return true;
-  const statePath = path.join(workspaceRoot, 'data/openclaw-growth-engineer/self-update.json');
-  const state = await readJsonIfPresent(statePath).catch(() => null);
-  const lastCheckedAt = Date.parse(String(state?.lastCheckedAt || ''));
-  return !Number.isFinite(lastCheckedAt) || Date.now() - lastCheckedAt > SELF_UPDATE_INTERVAL_MS;
-}
-
 async function writeSelfUpdateState(workspaceRoot, value) {
   const statePath = path.join(workspaceRoot, 'data/openclaw-growth-engineer/self-update.json');
   await writeJsonFile(statePath, {
@@ -4539,9 +4530,6 @@ async function maybeSelfUpdateFromClawHub(args) {
   const installedSkill = resolveInstalledSelfUpdateSkill(workspaceRoot);
   if (!installedSkill) return false;
   if (!(await commandExists('npx'))) return false;
-
-  const force = args.connectorWizard || String(process.env.OPENCLAW_GROWTH_SELF_UPDATE || '').trim().toLowerCase() === 'always';
-  if (!(await shouldRunSelfUpdate(workspaceRoot, force))) return false;
 
   const beforeOrigin = await readJsonIfPresent(installedSkill.originPath).catch(() => null);
   const beforeVersion = String(beforeOrigin?.installedVersion || '');
