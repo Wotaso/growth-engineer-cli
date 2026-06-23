@@ -1218,7 +1218,125 @@ function metricValueById(metrics, candidateIds) {
   return null;
 }
 
+function numericFromObject(value, candidateKeys = []) {
+  if (!value || typeof value !== 'object') return null;
+  for (const key of candidateKeys) {
+    const direct = coerceNumber(value[key]);
+    if (direct !== null) return direct;
+  }
+  return null;
+}
+
+function chartSummaryValue(payload) {
+  if (!payload || typeof payload !== 'object') return null;
+  const summary = payload.summary && typeof payload.summary === 'object' ? payload.summary : null;
+  const summaryValue = numericFromObject(summary, ['total', 'average', 'value', 'count', 'rate']);
+  if (summaryValue !== null) return summaryValue;
+  const values = Array.isArray(payload.values) ? payload.values : [];
+  const numericValues = [];
+  walk(values, (value) => {
+    const numeric = coerceNumber(value);
+    if (numeric !== null) numericValues.push(numeric);
+  });
+  if (numericValues.length === 0) return null;
+  return numericValues.reduce((total, value) => total + value, 0);
+}
+
+function revenueMetricValue(payload) {
+  return numericFromObject(payload, ['value', 'revenue', 'amount', 'total']);
+}
+
+function chartDisplayName(payload, fallback) {
+  return String(payload?.display_name || payload?.name || fallback || 'chart').trim();
+}
+
+function listCount(payload) {
+  return extractListItems(payload).length;
+}
+
+function summarizeRevenueCatCustomers(payload) {
+  const customers = extractListItems(payload);
+  const byPlatform = new Map();
+  const byCountry = new Map();
+  let activeEntitlementCustomers = 0;
+  for (const customer of customers) {
+    const platform = String(customer?.last_seen_platform || customer?.platform || '').trim();
+    const country = String(customer?.last_seen_country || customer?.country || '').trim();
+    if (platform) byPlatform.set(platform, (byPlatform.get(platform) || 0) + 1);
+    if (country) byCountry.set(country, (byCountry.get(country) || 0) + 1);
+    if (extractListItems(customer?.active_entitlements || customer?.activeEntitlements).length > 0) {
+      activeEntitlementCustomers += 1;
+    }
+  }
+  const topEntries = (map) => [...map.entries()]
+    .map(([key, count]) => ({ key, count }))
+    .sort((a, b) => b.count - a.count)
+    .slice(0, 5);
+  return {
+    sampledCustomers: customers.length,
+    activeEntitlementCustomers,
+    topPlatforms: topEntries(byPlatform),
+    topCountries: topEntries(byCountry),
+  };
+}
+
+function buildCombinedRevenueCatSummary(input) {
+  const projects = Array.isArray(input?.projects) ? input.projects : [];
+  const maxSignals = Math.max(1, Number(input?.maxSignals) || 8);
+  const signals = projects
+    .flatMap((summary) =>
+      (Array.isArray(summary?.signals) ? summary.signals : []).map((signal) => ({
+        ...signal,
+        id: `${summary?.meta?.projectId || summary?.project || 'revenuecat'}:${signal.id}`,
+        sourceProject: summary?.project || null,
+        evidence: [`RevenueCat project: ${summary?.meta?.projectName || summary?.project || 'unknown'}`, ...(signal.evidence || [])],
+        keywords: [summary?.meta?.projectId, ...(signal.keywords || [])].filter(Boolean),
+      })),
+    )
+    .sort((a, b) => {
+      const priorityDelta = priorityRank(b.priority) - priorityRank(a.priority);
+      if (priorityDelta !== 0) return priorityDelta;
+      return Math.abs(Number(b.delta_percent) || 0) - Math.abs(Number(a.delta_percent) || 0);
+    })
+    .slice(0, maxSignals);
+  const warnings = projects.flatMap((summary) =>
+    (Array.isArray(summary?.meta?.warnings) ? summary.meta.warnings : []).map((warning) => `${summary?.meta?.projectName || summary?.project}: ${warning}`),
+  );
+
+  return {
+    project: 'revenuecat:multiple',
+    window: String(input?.window || projects[0]?.window || 'latest'),
+    signals,
+    meta: {
+      generatedAt: new Date().toISOString(),
+      source: 'revenuecat',
+      multiProject: true,
+      projectCount: projects.length,
+      availableProjectCount: input?.availableProjectCount || projects.length,
+      availableProjectIds: Array.isArray(input?.availableProjectIds) ? input.availableProjectIds : [],
+      projects: projects.map((summary) => ({
+        project: summary?.project || null,
+        projectId: summary?.meta?.projectId || null,
+        projectName: summary?.meta?.projectName || null,
+        appsCount: summary?.meta?.appsCount || 0,
+        productsCount: summary?.meta?.productsCount || 0,
+        offeringsCount: summary?.meta?.offeringsCount || 0,
+        entitlementsCount: summary?.meta?.entitlementsCount || 0,
+        paywallsCount: summary?.meta?.paywallsCount || 0,
+        webhookIntegrationsCount: summary?.meta?.webhookIntegrationsCount || 0,
+        sampledCustomers: summary?.meta?.customerSample?.sampledCustomers || 0,
+        chartsCount: summary?.meta?.chartsCount || 0,
+      })),
+      warnings,
+    },
+  };
+}
+
 export function buildRevenueCatSummary(input) {
+  if (Array.isArray(input?.projects)) {
+    return buildCombinedRevenueCatSummary(input);
+  }
+
   const projectId =
     String(input?.projectId || input?.project?.id || 'revenuecat-project').trim() ||
     'revenuecat-project';
@@ -1227,12 +1345,54 @@ export function buildRevenueCatSummary(input) {
   const products = extractListItems(input?.productsPayload);
   const offerings = extractListItems(input?.offeringsPayload);
   const entitlements = extractListItems(input?.entitlementsPayload);
+  const paywalls = extractListItems(input?.paywallsPayload);
+  const webhookIntegrations = extractListItems(input?.webhooksPayload);
+  const customerSample = summarizeRevenueCatCustomers(input?.customersPayload);
   const metrics = Array.isArray(input?.overviewPayload?.metrics)
     ? input.overviewPayload.metrics
     : [];
+  const chartsPayload = input?.chartsPayload && typeof input.chartsPayload === 'object' ? input.chartsPayload : {};
+  const chartEntries = Object.entries(chartsPayload)
+    .map(([name, payload]) => {
+      const chartPayload = payload && typeof payload === 'object' ? payload : {};
+      return {
+        name,
+        displayName: chartDisplayName(chartPayload, name),
+        value: chartSummaryValue(chartPayload),
+        category: String((chartPayload as any).category || '').trim() || null,
+      };
+    })
+    .filter((entry) => entry.value !== null);
   const warnings = Array.isArray(input?.warnings) ? input.warnings.filter(Boolean) : [];
 
   const signals = [];
+  const revenueValue = revenueMetricValue(input?.revenuePayload);
+  const previousRevenueValue = revenueMetricValue(input?.previousRevenuePayload);
+  if (revenueValue !== null) {
+    const delta = previousRevenueValue !== null ? computeDeltaPercent(revenueValue, previousRevenueValue) : null;
+    maybePushSignal(signals, {
+      id: 'revenuecat_revenue_window',
+      title: delta !== null && delta < -15 ? 'RevenueCat revenue dropped versus the previous period' : 'RevenueCat revenue is available for monetization analysis',
+      area: delta !== null && delta < -15 ? 'retention' : 'revenue',
+      priority: delta !== null && delta < -25 ? 'high' : 'medium',
+      metric: 'revenuecat_revenue',
+      current_value: round(revenueValue),
+      baseline_value: previousRevenueValue,
+      delta_percent: delta,
+      evidence: [
+        `Revenue ${input?.window || 'current window'}: ${round(revenueValue)}`,
+        previousRevenueValue !== null ? `Previous comparable revenue: ${round(previousRevenueValue)}` : null,
+        delta !== null ? `Revenue delta: ${delta}%` : null,
+      ].filter(Boolean),
+      suggested_actions: [
+        'Compare RevenueCat revenue movement with AnalyticsCLI paywall exposure, purchase success, and activation cohorts',
+        'Check whether the revenue movement started after a release, paywall, pricing, or acquisition-source change',
+      ],
+      keywords: ['revenuecat', 'revenue', 'mrr', 'subscription', 'paywall'],
+      confidence: 'high',
+    });
+  }
+
   const revenueMetric = metricValueById(metrics, [
     'revenue',
     'mrr',
@@ -1243,6 +1403,7 @@ export function buildRevenueCatSummary(input) {
   const activeTrialsMetric = metricValueById(metrics, ['active_trials']);
   const activeSubscriptionsMetric = metricValueById(metrics, ['active_subscriptions', 'actives']);
   const churnMetric = metricValueById(metrics, ['churn', 'churn_rate']);
+  const refundMetric = metricValueById(metrics, ['refund_rate', 'refunds']);
 
   if (revenueMetric || activeSubscriptionsMetric || activeTrialsMetric) {
     maybePushSignal(signals, {
@@ -1297,6 +1458,55 @@ export function buildRevenueCatSummary(input) {
     });
   }
 
+  const growthCharts = chartEntries
+    .filter((entry) => ['mrr', 'actives', 'trials', 'trials_new', 'trial_conversion_rate', 'conversion_to_paying'].includes(entry.name))
+    .slice(0, 6);
+  if (growthCharts.length > 0) {
+    maybePushSignal(signals, {
+      id: 'revenuecat_growth_charts_available',
+      title: 'RevenueCat subscription and trial charts are available',
+      area: 'revenue',
+      priority: 'medium',
+      metric: 'revenuecat_chart_metrics',
+      current_value: growthCharts.length,
+      baseline_value: null,
+      delta_percent: null,
+      evidence: growthCharts.map((entry) => `${entry.displayName}: ${round(entry.value)}`),
+      suggested_actions: [
+        'Use trials, trial conversion, MRR, and active subscription movement to distinguish paywall conversion problems from retention/churn problems',
+        'Segment the strongest movement by release, product, country, and source where RevenueCat chart options allow it',
+      ],
+      keywords: ['revenuecat', 'charts', 'trials', 'mrr', 'actives', 'conversion'],
+      confidence: 'high',
+    });
+  }
+
+  const riskCharts = chartEntries
+    .filter((entry) => ['churn', 'refund_rate'].includes(entry.name) || entry.value > 0 && ['retention'].includes(entry.category || ''))
+    .slice(0, 4);
+  if ((refundMetric && refundMetric.value > 0) || riskCharts.length > 0) {
+    maybePushSignal(signals, {
+      id: 'revenuecat_churn_refund_charts_available',
+      title: 'RevenueCat churn/refund context is available',
+      area: 'retention',
+      priority: riskCharts.some((entry) => entry.value >= 10) || (refundMetric?.value || 0) >= 10 ? 'high' : 'medium',
+      metric: refundMetric?.id || riskCharts[0]?.name || 'revenuecat_retention_risk',
+      current_value: refundMetric?.value ?? riskCharts[0]?.value ?? 0,
+      baseline_value: 0,
+      delta_percent: null,
+      evidence: [
+        refundMetric ? `${refundMetric.metric?.name || refundMetric.id}: ${refundMetric.value}` : null,
+        ...riskCharts.map((entry) => `${entry.displayName}: ${round(entry.value)}`),
+      ].filter(Boolean),
+      suggested_actions: [
+        'Compare churn/refund timing with first-week retention, paywall promise, onboarding completion, and support feedback',
+        'Do not scale acquisition until refund/churn movement is explained for the affected cohort or product',
+      ],
+      keywords: ['revenuecat', 'churn', 'refund', 'retention', 'subscription'],
+      confidence: 'medium',
+    });
+  }
+
   if (products.length === 0 || offerings.length === 0 || entitlements.length === 0) {
     maybePushSignal(signals, {
       id: 'revenuecat_catalog_incomplete',
@@ -1345,10 +1555,82 @@ export function buildRevenueCatSummary(input) {
     });
   }
 
+  if (paywalls.length > 0) {
+    maybePushSignal(signals, {
+      id: 'revenuecat_paywalls_available',
+      title: 'RevenueCat paywall configuration is available',
+      area: 'paywall',
+      priority: 'low',
+      metric: 'revenuecat_paywalls',
+      current_value: paywalls.length,
+      baseline_value: 1,
+      delta_percent: computeDeltaPercent(paywalls.length, 1),
+      evidence: [
+        `Paywalls: ${paywalls.slice(0, 5).map(displayName).filter(Boolean).join(', ') || paywalls.length}`,
+        `Offerings: ${offerings.length}`,
+        `Products: ${products.length}`,
+      ],
+      suggested_actions: [
+        'Map configured paywalls to AnalyticsCLI paywall screen events before changing copy or package order',
+        'Use RevenueCat paywall names as hypotheses when investigating purchase conversion and trial starts',
+      ],
+      keywords: ['revenuecat', 'paywall', 'offerings', 'conversion'],
+      confidence: 'medium',
+    });
+  }
+
+  if (webhookIntegrations.length === 0) {
+    maybePushSignal(signals, {
+      id: 'revenuecat_webhooks_missing',
+      title: 'RevenueCat webhook integrations were not visible',
+      area: 'analytics_anomaly',
+      priority: 'medium',
+      metric: 'revenuecat_webhook_integrations',
+      current_value: 0,
+      baseline_value: 1,
+      delta_percent: -100,
+      evidence: [
+        'No RevenueCat webhook integration was returned by the API for this project.',
+        'Without webhooks, local product analytics may miss renewal, cancellation, refund, and billing-state changes.',
+      ],
+      suggested_actions: [
+        'Connect RevenueCat webhooks to the analytics backend if subscription lifecycle events are needed for churn and LTV analysis',
+        'Verify renewal/cancellation/refund events appear in AnalyticsCLI before using monetization cohorts for decisions',
+      ],
+      keywords: ['revenuecat', 'webhooks', 'subscription_lifecycle', 'churn'],
+      confidence: 'medium',
+    });
+  }
+
+  if (customerSample.sampledCustomers > 0) {
+    maybePushSignal(signals, {
+      id: 'revenuecat_customer_sample_available',
+      title: 'RevenueCat customer sample is available for monetization segmentation',
+      area: 'revenue',
+      priority: 'low',
+      metric: 'revenuecat_sampled_customers',
+      current_value: customerSample.sampledCustomers,
+      baseline_value: null,
+      delta_percent: null,
+      evidence: [
+        `Sampled customers: ${customerSample.sampledCustomers}`,
+        `Customers with active entitlements in sample: ${customerSample.activeEntitlementCustomers}`,
+        customerSample.topPlatforms.length > 0 ? `Top platforms: ${customerSample.topPlatforms.map((entry) => `${entry.key} ${entry.count}`).join(', ')}` : null,
+        customerSample.topCountries.length > 0 ? `Top countries: ${customerSample.topCountries.map((entry) => `${entry.key} ${entry.count}`).join(', ')}` : null,
+      ].filter(Boolean),
+      suggested_actions: [
+        'Use the customer sample only as segmentation context; rely on RevenueCat charts and AnalyticsCLI cohorts for aggregate decisions',
+        'Compare platform/country monetization patterns with ASC source mix and AnalyticsCLI activation quality before changing pricing',
+      ],
+      keywords: ['revenuecat', 'customers', 'segmentation', 'platform', 'country'],
+      confidence: 'medium',
+    });
+  }
+
   return {
     project: `revenuecat:${projectId}`,
-    window: 'latest',
-    signals: sortSignals(signals).slice(0, Math.max(1, Number(input?.maxSignals) || 4)),
+    window: input?.window || 'latest',
+    signals: sortSignals(signals).slice(0, Math.max(1, Number(input?.maxSignals) || 8)),
     meta: {
       generatedAt: new Date().toISOString(),
       source: 'revenuecat',
@@ -1358,7 +1640,28 @@ export function buildRevenueCatSummary(input) {
       productsCount: products.length,
       offeringsCount: offerings.length,
       entitlementsCount: entitlements.length,
+      paywallsCount: paywalls.length,
+      webhookIntegrationsCount: webhookIntegrations.length,
+      customerSample,
       metricsCount: metrics.length,
+      chartsCount: Object.keys(chartsPayload).length,
+      chartMetrics: chartEntries.map((entry) => ({
+        name: entry.name,
+        displayName: entry.displayName,
+        value: entry.value,
+        category: entry.category,
+      })),
+      revenue: revenueValue,
+      previousRevenue: previousRevenueValue,
+      listCounts: {
+        apps: listCount(input?.appsPayload),
+        products: listCount(input?.productsPayload),
+        offerings: listCount(input?.offeringsPayload),
+        entitlements: listCount(input?.entitlementsPayload),
+        paywalls: listCount(input?.paywallsPayload),
+        webhookIntegrations: listCount(input?.webhooksPayload),
+        customers: listCount(input?.customersPayload),
+      },
       warnings,
     },
   };
@@ -1712,10 +2015,50 @@ function seoLabel(row) {
   return [row.query, row.page].filter(Boolean).join(' -> ') || row.query || row.page || 'unknown';
 }
 
+function normalizeGscSitemapEntries(gscContext) {
+  const groups = Array.isArray(gscContext?.sitemaps) ? gscContext.sitemaps : [];
+  return groups.flatMap((group) =>
+    (Array.isArray(group?.sitemaps) ? group.sitemaps : []).map((sitemap) => ({
+      siteUrl: String(group?.siteUrl || '').trim(),
+      path: String(sitemap?.path || sitemap?.url || '').trim(),
+      type: String(sitemap?.type || '').trim() || null,
+      isPending: Boolean(sitemap?.isPending),
+      isSitemapsIndex: Boolean(sitemap?.isSitemapsIndex),
+      lastSubmitted: String(sitemap?.lastSubmitted || '').trim() || null,
+      lastDownloaded: String(sitemap?.lastDownloaded || '').trim() || null,
+      warnings: coerceNumber(sitemap?.warnings) || 0,
+      errors: coerceNumber(sitemap?.errors) || 0,
+      contents: Array.isArray(sitemap?.contents) ? sitemap.contents : [],
+    })),
+  );
+}
+
+function normalizeGscInspections(gscContext) {
+  const inspections = Array.isArray(gscContext?.inspections) ? gscContext.inspections : [];
+  return inspections.map((entry) => {
+    const indexStatus = entry?.result?.indexStatusResult || {};
+    return {
+      siteUrl: String(entry?.siteUrl || '').trim(),
+      inspectionUrl: String(entry?.inspectionUrl || '').trim(),
+      verdict: String(indexStatus?.verdict || '').trim() || null,
+      coverageState: String(indexStatus?.coverageState || '').trim() || null,
+      indexingState: String(indexStatus?.indexingState || '').trim() || null,
+      robotsTxtState: String(indexStatus?.robotsTxtState || '').trim() || null,
+      lastCrawlTime: String(indexStatus?.lastCrawlTime || '').trim() || null,
+      pageFetchState: String(indexStatus?.pageFetchState || '').trim() || null,
+      googleCanonical: String(indexStatus?.googleCanonical || '').trim() || null,
+      userCanonical: String(indexStatus?.userCanonical || '').trim() || null,
+    };
+  });
+}
+
 export function buildSeoSummary(input) {
   const rows = Array.isArray(input?.rows) ? input.rows.map(normalizeSeoRow) : [];
   const keywordRows = Array.isArray(input?.keywordRows) ? input.keywordRows.map(normalizeSeoRow) : [];
   const warnings = Array.isArray(input?.warnings) ? input.warnings.filter(Boolean).map(String) : [];
+  const gscSites = Array.isArray(input?.gscContext?.sites) ? input.gscContext.sites.map((site) => String(site).trim()).filter(Boolean) : [];
+  const gscSitemaps = normalizeGscSitemapEntries(input?.gscContext);
+  const gscInspections = normalizeGscInspections(input?.gscContext);
   const maxSignals = Math.max(1, Number(input?.maxSignals) || 8);
   const signals = [];
 
@@ -1792,6 +2135,70 @@ export function buildSeoSummary(input) {
     });
   }
 
+  const sitemapErrors = gscSitemaps.filter((sitemap) => sitemap.errors > 0 || sitemap.warnings > 0 || sitemap.isPending);
+  if (gscSitemaps.length === 0 && gscSites.length > 0) {
+    maybePushSignal(signals, {
+      id: 'seo_gsc_no_sitemaps_visible',
+      title: 'Search Console has verified properties but no visible sitemaps',
+      area: 'marketing',
+      priority: 'medium',
+      metric: 'gsc_sitemaps',
+      current_value: 0,
+      baseline_value: 1,
+      delta_percent: -100,
+      evidence: gscSites.slice(0, 5).map((site) => `${site}: no sitemap entries returned`),
+      suggested_actions: [
+        'Submit the canonical sitemap or sitemap index for each public property in Search Console',
+        'Verify sitemap URLs match the public canonical URLs used by the app and landing pages',
+      ],
+      keywords: ['seo', 'gsc', 'sitemap', 'indexing'],
+      confidence: 'medium',
+    });
+  } else if (sitemapErrors.length > 0) {
+    maybePushSignal(signals, {
+      id: 'seo_gsc_sitemap_issues',
+      title: 'Search Console sitemap status needs attention',
+      area: 'marketing',
+      priority: sitemapErrors.some((sitemap) => sitemap.errors > 0) ? 'high' : 'medium',
+      metric: 'gsc_sitemap_errors',
+      current_value: sitemapErrors.reduce((total, sitemap) => total + sitemap.errors + sitemap.warnings + (sitemap.isPending ? 1 : 0), 0),
+      baseline_value: 0,
+      delta_percent: 100,
+      evidence: sitemapErrors.slice(0, 6).map((sitemap) => `${sitemap.siteUrl} ${sitemap.path || 'sitemap'}: errors=${sitemap.errors}, warnings=${sitemap.warnings}, pending=${sitemap.isPending}`),
+      suggested_actions: [
+        'Fix sitemap errors before treating low indexed-page coverage as a content or keyword problem',
+        'Compare sitemap lastDownloaded/lastSubmitted dates with recent deploys and generated page changes',
+      ],
+      keywords: ['seo', 'gsc', 'sitemap', 'indexing', 'technical-seo'],
+      confidence: 'high',
+    });
+  }
+
+  const failingInspections = gscInspections.filter((inspection) => {
+    const verdict = String(inspection.verdict || '').toUpperCase();
+    const coverage = String(inspection.coverageState || '').toLowerCase();
+    return verdict && verdict !== 'PASS' || /(not indexed|excluded|blocked|error|duplicate|alternate)/.test(coverage);
+  });
+  if (failingInspections.length > 0) {
+    maybePushSignal(signals, {
+      id: 'seo_gsc_url_inspection_issues',
+      title: 'Search Console URL Inspection found indexability problems',
+      area: 'marketing',
+      priority: 'high',
+      metric: 'gsc_url_inspection_failures',
+      current_value: failingInspections.length,
+      baseline_value: 0,
+      delta_percent: 100,
+      evidence: failingInspections.slice(0, 6).map((inspection) => `${inspection.inspectionUrl}: verdict=${inspection.verdict || 'unknown'}, coverage=${inspection.coverageState || 'unknown'}, robots=${inspection.robotsTxtState || 'unknown'}`),
+      suggested_actions: [
+        'Fix canonical, robots, noindex, redirect, or crawlability issues before creating more SEO pages',
+        'Re-inspect only the corrected priority URLs after deploy; URL Inspection is a diagnostic sample, not a bulk indexing lever',
+      ],
+      keywords: ['seo', 'gsc', 'url-inspection', 'indexing', 'canonical'],
+      confidence: 'high',
+    });
+  }
+
   if (gscRows.length === 0 && keywordRows.length === 0) {
     maybePushSignal(signals, {
       id: 'seo_no_search_data',
@@ -1841,6 +2248,9 @@ export function buildSeoSummary(input) {
       source: 'seo',
       siteUrl: input?.siteUrl || null,
       gscRows: gscRows.length,
+      gscSites,
+      gscSitemaps,
+      gscInspections,
       keywordRows: keywordRows.length,
       paidProvider: input?.paidProvider || null,
       warnings,
@@ -1920,7 +2330,44 @@ function extractSentryReleaseVersions(issue) {
       }
     }
   }
+  if (Array.isArray(issue?.eventsPayload)) {
+    for (const event of issue.eventsPayload) {
+      values.push(event?.release, event?.metadata?.release, event?.metadata?.version, event?.metadata?.appVersion);
+      if (Array.isArray(event?.tags)) {
+        for (const tag of event.tags) {
+          const key = String(tag?.key || tag?.name || '').toLowerCase();
+          if (/(release|version|app\.version|dist|build)/.test(key)) {
+            values.push(tag?.value);
+          }
+        }
+      }
+    }
+  }
   return [...new Set(values.map(normalizeVersionToken).filter(Boolean))].sort();
+}
+
+function summarizeSentryEvents(issue) {
+  const events = Array.isArray(issue?.eventsPayload) ? issue.eventsPayload : [];
+  return {
+    count: events.length,
+    latestTimestamp: events
+      .map((event) => String(event?.dateCreated || event?.timestamp || '').trim())
+      .filter(Boolean)
+      .sort()
+      .pop() || null,
+    releases: [...new Set(events.flatMap((event) => [
+      event?.release,
+      event?.metadata?.release,
+      event?.metadata?.version,
+      event?.metadata?.appVersion,
+      ...(Array.isArray(event?.tags)
+        ? event.tags
+            .filter((tag) => /(release|version|app\.version|dist|build)/.test(String(tag?.key || tag?.name || '').toLowerCase()))
+            .map((tag) => tag?.value)
+        : []),
+    ]).map(normalizeVersionToken).filter(Boolean))].sort(),
+    urls: [...new Set(events.map((event) => String(event?.webUrl || event?.web_url || event?.url || '').trim()).filter(Boolean))].slice(0, 3),
+  };
 }
 
 function buildCombinedSentrySummary(input) {
@@ -2008,6 +2455,7 @@ export function buildSentrySummary(input) {
     .map((issue, index) => {
       const releaseVersions = extractSentryReleaseVersions(issue);
       const issueUrl = normalizeSentryIssueUrl(issue);
+      const eventSummary = summarizeSentryEvents(issue);
       return {
         id: String(issue.id || issue.shortId || `sentry_${index + 1}`),
         shortId: issue.shortId ? String(issue.shortId) : null,
@@ -2020,6 +2468,8 @@ export function buildSentrySummary(input) {
         events: normalizeSentryIssueCount(issue),
         users: normalizeSentryUserCount(issue),
         releaseVersions,
+        sampleEvents: eventSummary.count,
+        latestEventAt: eventSummary.latestTimestamp,
         area: 'crash',
         metric: 'sentry_unresolved_issues',
         sourceUrl: issueUrl || null,
@@ -2035,7 +2485,12 @@ export function buildSentrySummary(input) {
         ]
           .filter(Boolean)
           .map((value) => String(value).slice(0, 80)),
-        evidence: normalizeSentryEvidence(issue, environment),
+        evidence: [
+          ...normalizeSentryEvidence(issue, environment),
+          eventSummary.count > 0 ? `Sampled issue events: ${eventSummary.count}` : null,
+          eventSummary.latestTimestamp ? `Latest sampled event: ${eventSummary.latestTimestamp}` : null,
+          eventSummary.urls.length > 0 ? `Sample event links: ${eventSummary.urls.join(', ')}` : null,
+        ].filter(Boolean),
         suggested_actions: [
           'Map this Sentry issue to the current production release and affected user journey',
           'Check whether the crash intersects onboarding, paywall, purchase, or first value events',
@@ -2065,6 +2520,8 @@ export function buildSentrySummary(input) {
       metric: issue.metric,
       current_value: issue.events,
       releaseVersions: issue.releaseVersions,
+      sampleEvents: issue.sampleEvents,
+      latestEventAt: issue.latestEventAt,
       evidence: issue.evidence,
       suggested_actions: issue.suggested_actions,
       keywords: issue.stack_keywords,
@@ -2080,6 +2537,7 @@ export function buildSentrySummary(input) {
       project,
       environment: environment || null,
       issuesReturned: normalizedIssues.length,
+      sampledIssueEvents: normalizedIssues.reduce((total, issue) => total + (Number(issue.sampleEvents) || 0), 0),
     },
   };
 }

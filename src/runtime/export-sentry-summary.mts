@@ -96,6 +96,7 @@ Options:
   --last <duration>      Sentry statsPeriod, e.g. 24h, 7d, 30d (default: 7d)
   --query <query>        Issue search query (default: is:unresolved)
   --limit <n>            Max Sentry issues to fetch, capped at 50 (default: 20)
+  --events-per-issue <n> Fetch recent events for each returned issue, capped at 10 (default: 3)
   --max-signals <n>      Max normalized signals/issues to emit (default: 5)
   --base-url <url>       Sentry base URL for self-hosted instances (default: SENTRY_BASE_URL or ${DEFAULT_BASE_URL})
   --config <file>        OpenClaw config with sources.sentry.accounts[] (default: ${DEFAULT_CONFIG_PATH} when present)
@@ -114,6 +115,7 @@ function parseArgs(argv) {
     last: '7d',
     query: 'is:unresolved',
     limit: 20,
+    eventsPerIssue: 3,
     maxSignals: 5,
     baseUrl: String(process.env.SENTRY_BASE_URL || DEFAULT_BASE_URL).trim(),
     config: '',
@@ -143,6 +145,9 @@ function parseArgs(argv) {
       index += 1;
     } else if (token === '--limit') {
       args.limit = normalizeInteger(next, '--limit', 1, 50);
+      index += 1;
+    } else if (token === '--events-per-issue') {
+      args.eventsPerIssue = normalizeInteger(next, '--events-per-issue', 0, 10);
       index += 1;
     } else if (token === '--max-signals') {
       args.maxSignals = normalizeInteger(next, '--max-signals', 1, 20);
@@ -198,6 +203,7 @@ function normalizeProjectEntries(account) {
       last: String(entry.last || account.last || '').trim(),
       query: String(entry.query || account.query || '').trim(),
       limit: entry.limit || account.limit,
+      eventsPerIssue: entry.eventsPerIssue || entry.events_per_issue || account.eventsPerIssue || account.events_per_issue,
     }));
 }
 
@@ -234,6 +240,7 @@ function normalizeAccountConfigs(rawAccounts, args) {
       last: String(account.last || args.last || '').trim(),
       query: String(account.query || args.query || '').trim(),
       limit: account.limit || args.limit,
+      eventsPerIssue: account.eventsPerIssue || args.eventsPerIssue,
       maxSignals: args.maxSignals,
     }];
   });
@@ -253,6 +260,7 @@ function dedupeAccountConfigs(accounts) {
       last: account.last || '',
       query: account.query || '',
       limit: account.limit || '',
+      eventsPerIssue: account.eventsPerIssue || '',
     });
     if (seen.has(key)) continue;
     seen.add(key);
@@ -303,6 +311,7 @@ async function loadConfiguredAccounts(args) {
     last: args.last,
     query: args.query,
     limit: args.limit,
+    eventsPerIssue: args.eventsPerIssue,
   };
   return normalizeProjectEntries(singleAccount).length > 0 ? normalizeAccountConfigs([singleAccount], args) : [];
 }
@@ -457,6 +466,17 @@ async function listIssues(account, token) {
   }
 }
 
+async function listIssueEvents(account, token, issueId) {
+  try {
+    const url = buildUrl(account.baseUrl || DEFAULT_BASE_URL, `/api/0/issues/${encodeURIComponent(issueId)}/events/`, {
+      per_page: account.eventsPerIssue,
+    });
+    return (await sentryFetchList(url, token)).slice(0, Math.max(0, Number(account.eventsPerIssue) || 0));
+  } catch (error) {
+    throw withAccountTargetError(error, account, `Sentry issue event fetch ${issueId}`);
+  }
+}
+
 function buildFailureRecord(error, account, action) {
   return {
     id: account.id || account.accountId || null,
@@ -549,6 +569,18 @@ async function main() {
     try {
       const token = requireValue(process.env[account.tokenEnv], `${account.tokenEnv} for ${describeAccountTarget(account)}`);
       const issuesPayload = redactData(await listIssues(account, token));
+      const eventsPerIssue = Math.max(0, Math.min(Number(account.eventsPerIssue ?? args.eventsPerIssue) || 0, 10));
+      if (eventsPerIssue > 0) {
+        await mapLimit(issuesPayload, sentryFetchConcurrency(), async (issue) => {
+          const issueId = String(issue?.id || '').trim();
+          if (!issueId) return;
+          try {
+            issue.eventsPayload = redactData(await listIssueEvents({ ...account, eventsPerIssue }, token, issueId));
+          } catch (error) {
+            failures.push(buildFailureRecord(error, account, 'issue_event_fetch'));
+          }
+        });
+      }
       summaries.push({
         id: account.id,
         label: account.label,
@@ -557,6 +589,7 @@ async function main() {
         environment: account.environment,
         last: account.last || args.last,
         issuesPayload,
+        eventsPerIssue,
         maxSignals: args.maxSignals,
       });
     } catch (error) {

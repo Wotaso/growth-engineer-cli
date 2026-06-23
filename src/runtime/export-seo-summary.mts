@@ -28,6 +28,9 @@ Options:
   --max-sites <n>           Max GSC sites to query when --site is omitted (default: 20)
   --country <code>          Optional GSC country dimension filter
   --device <device>         Optional GSC device dimension filter
+  --include-sitemaps        Fetch Search Console sitemap status (default)
+  --no-sitemaps             Skip Search Console sitemap status
+  --inspect-url <url>       Run URL Inspection for a URL under an accessible property (repeatable)
   --gsc-csv <file>          Import Google Search Console CSV (repeatable)
   --csv <file>              Import keyword metrics CSV from Ahrefs/Semrush/DataForSEO/etc. (repeatable)
   --seed <keyword>          Seed keyword for optional DataForSEO (repeatable)
@@ -78,6 +81,8 @@ function parseArgs(argv) {
     maxSites: 20,
     country: '',
     device: '',
+    includeSitemaps: true,
+    inspectUrls: [],
     gscCsvFiles: [],
     csvFiles: [],
     seeds: [],
@@ -124,6 +129,13 @@ function parseArgs(argv) {
       index += 1;
     } else if (token === '--device') {
       args.device = String(next || '').trim();
+      index += 1;
+    } else if (token === '--include-sitemaps') {
+      args.includeSitemaps = true;
+    } else if (token === '--no-sitemaps') {
+      args.includeSitemaps = false;
+    } else if (token === '--inspect-url') {
+      args.inspectUrls.push(String(next || '').trim());
       index += 1;
     } else if (token === '--gsc-csv') {
       args.gscCsvFiles.push(String(next || '').trim());
@@ -384,6 +396,70 @@ async function fetchGscRows(args, warnings) {
   return rows;
 }
 
+async function fetchGscContext(args, warnings) {
+  const token = await getGscAccessToken();
+  if (!token) {
+    warnings.push('GSC access token/service account missing; skipped Search Console sitemap and URL Inspection API fetch.');
+    return { sites: [], sitemaps: [], inspections: [] };
+  }
+  const sites = await listGscSites(token, args, warnings);
+  const sitemaps = [];
+  if (args.includeSitemaps) {
+    for (const siteUrl of sites) {
+      try {
+        const payload = await gscFetchJson(
+          `https://www.googleapis.com/webmasters/v3/sites/${encodeURIComponent(siteUrl)}/sitemaps`,
+          token,
+        );
+        sitemaps.push({
+          siteUrl,
+          sitemaps: Array.isArray(payload?.sitemap) ? payload.sitemap : [],
+        });
+      } catch (error) {
+        warnings.push(`GSC sitemap query failed for ${siteUrl}: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+  }
+
+  const inspections = [];
+  for (const inspectionUrl of args.inspectUrls.filter(Boolean).slice(0, 25)) {
+    const siteUrl = sites.find((candidate) => propertyOwnsUrl(candidate, inspectionUrl)) || args.site || sites[0] || '';
+    if (!siteUrl) {
+      warnings.push(`Skipped URL Inspection for ${inspectionUrl}: no accessible GSC property found.`);
+      continue;
+    }
+    try {
+      const payload = await gscFetchJson('https://searchconsole.googleapis.com/v1/urlInspection/index:inspect', token, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          inspectionUrl,
+          siteUrl,
+        }),
+      });
+      inspections.push({ siteUrl, inspectionUrl, result: payload?.inspectionResult || payload });
+    } catch (error) {
+      warnings.push(`GSC URL Inspection failed for ${inspectionUrl}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+  return { sites, sitemaps, inspections };
+}
+
+function propertyOwnsUrl(property, inspectedUrl) {
+  const site = String(property || '').trim();
+  const url = String(inspectedUrl || '').trim();
+  if (!site || !url) return false;
+  if (site.startsWith('sc-domain:')) {
+    const domain = site.slice('sc-domain:'.length).toLowerCase();
+    try {
+      return new URL(url).hostname.toLowerCase().endsWith(domain);
+    } catch {
+      return false;
+    }
+  }
+  return url.startsWith(site);
+}
+
 async function dataForSeoRequest(endpoint, tasks) {
   const login = process.env.DATAFORSEO_LOGIN;
   const password = process.env.DATAFORSEO_PASSWORD;
@@ -457,6 +533,10 @@ async function main() {
   } catch (error) {
     warnings.push(error instanceof Error ? error.message : String(error));
   }
+  const gscContext = await fetchGscContext(args, warnings).catch((error) => {
+    warnings.push(error instanceof Error ? error.message : String(error));
+    return { sites: [], sitemaps: [], inspections: [] };
+  });
   for (const filePath of args.gscCsvFiles.filter(Boolean)) {
     try {
       rows.push(...(await readKeywordCsv(filePath, 'gsc-csv')));
@@ -482,6 +562,7 @@ async function main() {
     window: `${args.from}_${args.to}`,
     rows,
     keywordRows,
+    gscContext,
     paidProvider: args.dataforseo && args.confirmPaid ? 'dataforseo' : null,
     warnings,
     maxSignals: args.maxSignals,
