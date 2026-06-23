@@ -5,6 +5,7 @@ import path from 'node:path';
 import process from 'node:process';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { createSign } from 'node:crypto';
 import {
   buildGrowthRunnerCommand,
   buildOpenClawCronAddCommand,
@@ -487,6 +488,80 @@ function ascIsolatedEnv(overrides: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
     if (!Object.prototype.hasOwnProperty.call(overrides, 'ASC_PRIVATE_KEY_B64')) env.ASC_PRIVATE_KEY_B64 = undefined;
   }
   return env;
+}
+
+function base64UrlJson(value) {
+  return Buffer.from(JSON.stringify(value)).toString('base64url');
+}
+
+async function buildAscApiJwt(env: NodeJS.ProcessEnv = process.env) {
+  const keyId = normalizeString(env.ASC_KEY_ID);
+  const issuerId = normalizeString(env.ASC_ISSUER_ID);
+  const privateKeyPath = normalizeString(env.ASC_PRIVATE_KEY_PATH);
+  const privateKey = normalizeString(env.ASC_PRIVATE_KEY) ||
+    (normalizeString(env.ASC_PRIVATE_KEY_B64)
+      ? Buffer.from(normalizeString(env.ASC_PRIVATE_KEY_B64), 'base64').toString('utf8')
+      : privateKeyPath
+        ? await fs.readFile(privateKeyPath, 'utf8')
+        : '');
+  if (!keyId || !issuerId || !privateKey) return null;
+  const now = Math.floor(Date.now() / 1000);
+  const signingInput = `${base64UrlJson({ alg: 'ES256', kid: keyId, typ: 'JWT' })}.${base64UrlJson({
+    iss: issuerId,
+    iat: now - 60,
+    exp: now + 15 * 60,
+    aud: 'appstoreconnect-v1',
+  })}`;
+  const signer = createSign('SHA256');
+  signer.update(signingInput);
+  signer.end();
+  const signature = signer.sign({ key: privateKey, dsaEncoding: 'ieee-p1363' });
+  return `${signingInput}.${signature.toString('base64url')}`;
+}
+
+async function fetchAscApiJson(pathname, timeoutMs = 60_000, env: NodeJS.ProcessEnv = process.env) {
+  const token = await buildAscApiJwt(env);
+  if (!token) {
+    return { ok: false, status: 0, payload: null, error: 'ASC API credentials are incomplete' };
+  }
+  try {
+    const response = await fetch(`https://api.appstoreconnect.apple.com${pathname}`, {
+      headers: {
+        Accept: 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    const text = await response.text();
+    let payload: any = null;
+    try {
+      payload = text ? JSON.parse(text) : null;
+    } catch {
+      payload = { raw: text };
+    }
+    const error = Array.isArray(payload?.errors)
+      ? payload.errors.map((entry) => entry?.detail || entry?.title || entry?.code).filter(Boolean).join('; ')
+      : '';
+    return { ok: response.ok, status: response.status, payload, error };
+  } catch (error: any) {
+    return { ok: false, status: 0, payload: null, error: error?.message || String(error) };
+  }
+}
+
+async function listAscAppsDirect(timeoutMs = 60_000) {
+  const result = await fetchAscApiJson('/v1/apps?limit=200', timeoutMs, process.env);
+  if (!result.ok) {
+    return {
+      ok: false,
+      error: result.error || `Apple API returned HTTP ${result.status}`,
+      apps: [],
+    };
+  }
+  return {
+    ok: true,
+    error: null,
+    apps: extractAscAppChoices(result.payload),
+  };
 }
 
 async function fileExists(filePath) {
@@ -1795,9 +1870,11 @@ function extractAscAppChoices(payload) {
 async function listAscApps() {
   const result = await runShellCommand('asc apps list --output json', 60_000, { env: ascIsolatedEnv() });
   if (!result.ok) {
+    const fallback = await listAscAppsDirect(60_000);
+    if (fallback.ok) return fallback;
     return {
       ok: false,
-      error: result.stderr || `exit ${result.code}`,
+      error: `${result.stderr || `exit ${result.code}`} Direct Apple API fallback also failed: ${fallback.error}`,
       apps: [],
     };
   }

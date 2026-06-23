@@ -5,6 +5,7 @@ import path from 'node:path';
 import process from 'node:process';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { createSign } from 'node:crypto';
 import { applyOpenClawSecretRefs, loadOpenClawGrowthSecrets } from './openclaw-growth-env.mjs';
 
 const DEFAULT_CONFIG_PATH = 'data/openclaw-growth-engineer/config.json';
@@ -248,6 +249,80 @@ function normalizeString(value) {
   return String(value || '').trim();
 }
 
+function base64UrlJson(value) {
+  return Buffer.from(JSON.stringify(value)).toString('base64url');
+}
+
+async function buildAscApiJwt(env: NodeJS.ProcessEnv = process.env) {
+  const keyId = normalizeString(env.ASC_KEY_ID);
+  const issuerId = normalizeString(env.ASC_ISSUER_ID);
+  const privateKeyPath = normalizeString(env.ASC_PRIVATE_KEY_PATH);
+  const privateKey = normalizeString(env.ASC_PRIVATE_KEY) ||
+    (normalizeString(env.ASC_PRIVATE_KEY_B64)
+      ? Buffer.from(normalizeString(env.ASC_PRIVATE_KEY_B64), 'base64').toString('utf8')
+      : privateKeyPath
+        ? await fs.readFile(privateKeyPath, 'utf8')
+        : '');
+  if (!keyId || !issuerId || !privateKey) return null;
+  const now = Math.floor(Date.now() / 1000);
+  const signingInput = `${base64UrlJson({ alg: 'ES256', kid: keyId, typ: 'JWT' })}.${base64UrlJson({
+    iss: issuerId,
+    iat: now - 60,
+    exp: now + 15 * 60,
+    aud: 'appstoreconnect-v1',
+  })}`;
+  const signer = createSign('SHA256');
+  signer.update(signingInput);
+  signer.end();
+  const signature = signer.sign({ key: privateKey, dsaEncoding: 'ieee-p1363' });
+  return `${signingInput}.${signature.toString('base64url')}`;
+}
+
+async function fetchAscApiJson(pathname, timeoutMs = DEFAULT_TIMEOUT_MS, env: NodeJS.ProcessEnv = process.env) {
+  const token = await buildAscApiJwt(env);
+  if (!token) {
+    return { ok: false, status: 0, payload: null, error: 'ASC API credentials are incomplete' };
+  }
+  try {
+    const response = await fetch(`https://api.appstoreconnect.apple.com${pathname}`, {
+      headers: {
+        Accept: 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    const text = await response.text();
+    let payload: any = null;
+    try {
+      payload = text ? JSON.parse(text) : null;
+    } catch {
+      payload = { raw: text };
+    }
+    const error = Array.isArray(payload?.errors)
+      ? payload.errors.map((entry) => entry?.detail || entry?.title || entry?.code).filter(Boolean).join('; ')
+      : '';
+    return { ok: response.ok, status: response.status, payload, error };
+  } catch (error: any) {
+    return { ok: false, status: 0, payload: null, error: error?.message || String(error) };
+  }
+}
+
+async function listAscAppIdsDirect(timeoutMs = DEFAULT_TIMEOUT_MS) {
+  const result = await fetchAscApiJson('/v1/apps?limit=200', timeoutMs, process.env);
+  if (!result.ok) {
+    return {
+      ok: false,
+      error: result.error || `Apple API returned HTTP ${result.status}`,
+      appIds: [],
+    };
+  }
+  return {
+    ok: true,
+    error: null,
+    appIds: extractAscAppIds(result.payload),
+  };
+}
+
 function parseJsonFromStdout(stdout) {
   const text = String(stdout || '').trim();
   if (!text) return null;
@@ -402,10 +477,11 @@ async function checkGitHub(config, timeoutMs) {
 async function checkAscAnalyticsReadiness(timeoutMs) {
   const vendorNumber = normalizeString(process.env.ASC_VENDOR_NUMBER);
   const appList = await runShell('asc apps list --output json', { timeoutMs: Math.max(5_000, timeoutMs) });
-  if (!appList.ok) {
+  const directAppList = appList.ok ? null : await listAscAppIdsDirect(Math.max(5_000, timeoutMs));
+  if (!appList.ok && !directAppList?.ok) {
     return {
       status: 'blocked',
-      detail: `ASC App Analytics readiness could not list apps: ${normalizeString(appList.stderr) || `exit ${appList.code}`}`,
+      detail: `ASC App Analytics readiness could not list apps with asc CLI or direct Apple API: ${normalizeString(appList.stderr) || `exit ${appList.code}`}; ${directAppList?.error || 'direct API failed'}`,
       vendorNumber,
       appCount: 0,
       checkedAppCount: 0,
@@ -413,7 +489,7 @@ async function checkAscAnalyticsReadiness(timeoutMs) {
     };
   }
 
-  const appIds = extractAscAppIds(parseJsonFromStdout(appList.stdout));
+  const appIds = appList.ok ? extractAscAppIds(parseJsonFromStdout(appList.stdout)) : directAppList?.appIds || [];
   if (appIds.length === 0) {
     return {
       status: 'blocked',
