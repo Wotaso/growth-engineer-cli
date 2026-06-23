@@ -96,7 +96,7 @@ Options:
   --last <duration>      Sentry statsPeriod, e.g. 24h, 7d, 30d (default: 7d)
   --query <query>        Issue search query (default: is:unresolved)
   --limit <n>            Max Sentry issues to fetch, capped at 50 (default: 20)
-  --events-per-issue <n> Fetch recent events for each returned issue, capped at 10 (default: 3)
+  --events-per-issue <n> Fetch recent events for each returned issue, capped at 10 (default: 0)
   --max-signals <n>      Max normalized signals/issues to emit (default: 5)
   --base-url <url>       Sentry base URL for self-hosted instances (default: SENTRY_BASE_URL or ${DEFAULT_BASE_URL})
   --config <file>        OpenClaw config with sources.sentry.accounts[] (default: ${DEFAULT_CONFIG_PATH} when present)
@@ -115,7 +115,7 @@ function parseArgs(argv) {
     last: '7d',
     query: 'is:unresolved',
     limit: 20,
-    eventsPerIssue: 3,
+    eventsPerIssue: 0,
     maxSignals: 5,
     baseUrl: String(process.env.SENTRY_BASE_URL || DEFAULT_BASE_URL).trim(),
     config: '',
@@ -597,7 +597,7 @@ async function main() {
     }
   });
 
-  const blockingFailures = failures.filter((failure) => !failure.retryable);
+  const blockingFailures = failures.filter((failure) => !failure.retryable && failure.action !== 'issue_event_fetch');
   if (blockingFailures.length > 0) {
     throw new Error(`Sentry connector has non-retryable configuration/auth failures:\n${formatBlockingFailures(blockingFailures)}`);
   }
