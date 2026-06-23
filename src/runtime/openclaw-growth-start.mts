@@ -2000,6 +2000,24 @@ function isAscAnalyticsRequestAlreadyExists(error) {
   return normalized.includes('already have such an entity') || normalized.includes('state_error');
 }
 
+function isAscAnalyticsRequestCreationDeferredError(error) {
+  const normalized = normalizeString(error).toLowerCase();
+  if (!normalized) return false;
+  if (isInvalidAscPrivateKeyError(error) || isAscPrivateKeyPermissionError(error)) return false;
+  if (
+    normalized.includes('401') ||
+    normalized.includes('unauthorized') ||
+    normalized.includes('invalid issuer') ||
+    normalized.includes('invalid token') ||
+    normalized.includes('not authorized')
+  ) {
+    return false;
+  }
+  return isAscAppListDeferredError(error) ||
+    normalized.includes('forbidden for security') ||
+    normalized.includes('for security reasons');
+}
+
 async function listAscAnalyticsRequests(appId) {
   const result = await runShellCommand(`asc analytics requests --app ${quote(appId)} --output json`, 60_000, {
     env: ascIsolatedEnv(),
@@ -2096,12 +2114,12 @@ async function ensureAscAnalyticsRequest(appId) {
         usedBootstrapAdmin,
       };
     }
-    if (isAscAppListDeferredError(error)) {
+    if (isAscAnalyticsRequestCreationDeferredError(error)) {
       return {
         ok: true,
         status: 'deferred',
         requestId: null,
-        detail: 'Apple Analytics Report Request creation is temporarily unavailable; setup saved ASC credentials and will retry later',
+        detail: 'Apple did not create the Analytics Report Request now; setup saved ASC credentials and will retry later',
         usedBootstrapAdmin,
       };
     }
