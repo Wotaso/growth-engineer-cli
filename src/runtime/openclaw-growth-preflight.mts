@@ -637,6 +637,31 @@ async function testAscAppsListDirect(timeoutMs) {
   }
 }
 
+function isAscAppListDeferredError(detail) {
+  const normalized = String(detail || '').toLowerCase();
+  if (!normalized) return false;
+  if (
+    normalized.includes('credentials are incomplete') ||
+    normalized.includes('401') ||
+    normalized.includes('403') ||
+    normalized.includes('forbidden') ||
+    normalized.includes('unauthorized') ||
+    normalized.includes('not authorized') ||
+    normalized.includes('invalid issuer') ||
+    normalized.includes('invalid token')
+  ) {
+    return false;
+  }
+  return normalized.includes('unexpected error occurred on the server side') ||
+    normalized.includes('timed out after') ||
+    normalized.includes('fetch failed') ||
+    normalized.includes('network timeout') ||
+    normalized.includes('econnreset') ||
+    normalized.includes('etimedout') ||
+    normalized.includes('eai_again') ||
+    normalized.includes('enotfound');
+}
+
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -1175,9 +1200,16 @@ async function testAscCliAppsList(timeoutMs) {
   if (!result.ok) {
     const fallback = await testAscAppsListDirect(Math.max(timeoutMs, ASC_COMMAND_SMOKE_TIMEOUT_MS));
     if (fallback.ok) return fallback;
+    const detail = `${result.stderr || `exit ${result.code}`} Direct Apple API fallback also failed: ${fallback.detail}`;
+    if (isAscAppListDeferredError(detail)) {
+      return {
+        ok: true,
+        detail: 'ASC app listing is temporarily unavailable from Apple; credentials are saved and app discovery will retry later',
+      };
+    }
     return {
       ok: false,
-      detail: truncate(`${result.stderr || `exit ${result.code}`} Direct Apple API fallback also failed: ${fallback.detail}`),
+      detail: truncate(detail),
     };
   }
 

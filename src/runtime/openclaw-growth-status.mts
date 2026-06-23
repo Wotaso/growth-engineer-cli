@@ -386,6 +386,31 @@ function isAscAnalyticsRequestCollectionUnsupported(error) {
     normalized.includes('allowed operations are: create, delete, get_instance');
 }
 
+function isAscAppListDeferredError(detail) {
+  const normalized = normalizeString(detail).toLowerCase();
+  if (!normalized) return false;
+  if (
+    normalized.includes('credentials are incomplete') ||
+    normalized.includes('401') ||
+    normalized.includes('403') ||
+    normalized.includes('forbidden') ||
+    normalized.includes('unauthorized') ||
+    normalized.includes('not authorized') ||
+    normalized.includes('invalid issuer') ||
+    normalized.includes('invalid token')
+  ) {
+    return false;
+  }
+  return normalized.includes('unexpected error occurred on the server side') ||
+    normalized.includes('timed out after') ||
+    normalized.includes('fetch failed') ||
+    normalized.includes('network timeout') ||
+    normalized.includes('econnreset') ||
+    normalized.includes('etimedout') ||
+    normalized.includes('eai_again') ||
+    normalized.includes('enotfound');
+}
+
 async function runPreflight(configPath, timeoutMs, progressJson = false, onlyConnectors: string[] = []) {
   const command = [
     nodeRuntimeScriptCommand('openclaw-growth-preflight.mjs'),
@@ -479,9 +504,30 @@ async function checkAscAnalyticsReadiness(timeoutMs) {
   const appList = await runShell('asc apps list --output json', { timeoutMs: Math.max(5_000, timeoutMs) });
   const directAppList = appList.ok ? null : await listAscAppIdsDirect(Math.max(5_000, timeoutMs));
   if (!appList.ok && !directAppList?.ok) {
+    const detail = `ASC App Analytics readiness could not list apps with asc CLI or direct Apple API: ${normalizeString(appList.stderr) || `exit ${appList.code}`}; ${directAppList?.error || 'direct API failed'}`;
+    if (isAscAppListDeferredError(detail)) {
+      if (!vendorNumber) {
+        return {
+          status: 'partial',
+          detail: 'ASC credentials are configured, but Apple app discovery is temporarily unavailable and ASC_VENDOR_NUMBER is missing for Sales and Trends/App Units',
+          vendorNumber,
+          appCount: 0,
+          checkedAppCount: 0,
+          requestCount: 0,
+        };
+      }
+      return {
+        status: 'connected',
+        detail: 'ASC credentials and ASC_VENDOR_NUMBER are configured; Apple app discovery is temporarily unavailable and will retry later',
+        vendorNumber,
+        appCount: 0,
+        checkedAppCount: 0,
+        requestCount: 0,
+      };
+    }
     return {
       status: 'blocked',
-      detail: `ASC App Analytics readiness could not list apps with asc CLI or direct Apple API: ${normalizeString(appList.stderr) || `exit ${appList.code}`}; ${directAppList?.error || 'direct API failed'}`,
+      detail,
       vendorNumber,
       appCount: 0,
       checkedAppCount: 0,
