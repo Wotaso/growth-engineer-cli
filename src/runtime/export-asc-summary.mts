@@ -35,7 +35,9 @@ Options:
   --country <code>       Ratings country override (default: all countries)
   --reviews-limit <n>    Review summarizations limit (default: 20)
   --feedback-limit <n>   TestFlight feedback limit (default: 20)
-  --analytics-instance-limit <n> Maximum App Analytics report instances to download (default: 8)
+  --analytics-report-scope <scope> App Analytics report coverage: all or core (default: all)
+  --analytics-report-limit <n> Maximum App Analytics report types to download (default: unlimited)
+  --analytics-instance-limit <n> Maximum App Analytics instances per report to inspect (default: 8)
   --command-timeout-ms <n> Maximum time for each asc command (default: 45000)
   --max-signals <n>      Maximum signals to emit (default: 4)
   --help, -h             Show help
@@ -56,6 +58,8 @@ function parseArgs(argv) {
     country: '',
     reviewsLimit: 20,
     feedbackLimit: 20,
+    analyticsReportScope: String(process.env.ASC_ANALYTICS_REPORT_SCOPE || 'all').trim().toLowerCase(),
+    analyticsReportLimit: Number.parseInt(String(process.env.ASC_ANALYTICS_REPORT_LIMIT || '0'), 10),
     analyticsInstanceLimit: 8,
     commandTimeoutMs: Number.parseInt(String(process.env.ASC_EXPORT_COMMAND_TIMEOUT_MS || '45000'), 10),
     maxSignals: 4,
@@ -101,6 +105,20 @@ function parseArgs(argv) {
       }
       args.feedbackLimit = parsed;
       index += 1;
+    } else if (token === '--analytics-report-scope') {
+      const parsed = String(next || '').trim().toLowerCase();
+      if (!['all', 'core'].includes(parsed)) {
+        printHelpAndExit(1, `Invalid value for --analytics-report-scope: ${String(next || '')}. Use all or core.`);
+      }
+      args.analyticsReportScope = parsed;
+      index += 1;
+    } else if (token === '--analytics-report-limit') {
+      const parsed = Number.parseInt(String(next || ''), 10);
+      if (!Number.isFinite(parsed) || parsed < 0) {
+        printHelpAndExit(1, `Invalid value for --analytics-report-limit: ${String(next || '')}`);
+      }
+      args.analyticsReportLimit = parsed;
+      index += 1;
     } else if (token === '--analytics-instance-limit') {
       const parsed = Number.parseInt(String(next || ''), 10);
       if (!Number.isFinite(parsed) || parsed <= 0) {
@@ -127,6 +145,13 @@ function parseArgs(argv) {
     } else {
       printHelpAndExit(1, `Unknown argument: ${token}`);
     }
+  }
+
+  if (!['all', 'core'].includes(args.analyticsReportScope)) {
+    printHelpAndExit(1, `Invalid value for ASC_ANALYTICS_REPORT_SCOPE: ${args.analyticsReportScope}. Use all or core.`);
+  }
+  if (!Number.isFinite(args.analyticsReportLimit) || args.analyticsReportLimit < 0) {
+    args.analyticsReportLimit = 0;
   }
 
   return args;
@@ -567,6 +592,65 @@ function firstRowValue(row, candidates) {
   return value || null;
 }
 
+function reportColumns(report) {
+  if (!Array.isArray(report?.rows) || report.rows.length === 0) return [];
+  return Object.keys(report.rows[0] || {});
+}
+
+function isNumericReportValue(value) {
+  const normalized = String(value ?? '').trim().replace(/%$/, '').replace(/,/g, '');
+  if (!normalized) return false;
+  return Number.isFinite(Number(normalized));
+}
+
+function classifyReportColumns(report) {
+  const columns = reportColumns(report);
+  const metricHints = [
+    'impressions',
+    'unique impressions',
+    'product page views',
+    'page views',
+    'units',
+    'first-time downloads',
+    'redownloads',
+    'conversion rate',
+    'crashes',
+    'sessions',
+    'active devices',
+    'installations',
+    'deletions',
+    'purchases',
+    'proceeds',
+    'paying users',
+    'subscriptions',
+    'trial starts',
+    'sales',
+    'developer proceeds',
+  ].map(normalizeKey);
+  const metrics = [];
+  const dimensions = [];
+  for (const column of columns) {
+    const normalized = normalizeKey(column);
+    const dimensionName = /\b(identifier| id|id |date|country|territory|currency|code|type|name|reason|version|sku|provider|developer|platform|device|client|category|period)\b/i.test(column) ||
+      /identifier|country|territory|currency|code|type|name|reason|version|sku|provider|developer|platform|device|client|category|period/.test(normalized);
+    const sampleValues = Array.isArray(report?.rows)
+      ? report.rows.slice(0, 50).map((row) => row?.[column]).filter((value) => String(value ?? '').trim())
+      : [];
+    const numericShare = sampleValues.length > 0
+      ? sampleValues.filter(isNumericReportValue).length / sampleValues.length
+      : 0;
+    const forcedMetric = metricHints.includes(normalized);
+    const nameLooksMetric = forcedMetric ||
+      /\b(count|counts|rate|duration|amount|proceeds|units|sessions|crashes|views|impressions|purchases|installs|downloads|deletions|users)\b/i.test(column);
+    if (forcedMetric || (!dimensionName && (numericShare >= 0.8 || nameLooksMetric))) {
+      metrics.push(column);
+    } else {
+      dimensions.push(column);
+    }
+  }
+  return { metrics, dimensions };
+}
+
 function reportCachePaths(appCacheDir, baseName) {
   const safeBase = String(baseName || 'report').replace(/[^a-zA-Z0-9._-]+/g, '-');
   return {
@@ -661,29 +745,33 @@ async function listAppleApiCollection(pathOrUrl, warnings, label, timeoutMs, lim
   return { ok: true, items, error: null, credential: null };
 }
 
-function pickRelevantAnalyticsReports(reports, limit) {
+function scoreAnalyticsReport(report) {
+  const attrs = report?.attributes && typeof report.attributes === 'object' ? report.attributes : {};
+  const name = String(attrs.name || '');
+  const category = String(attrs.category || '');
+  const text = `${category} ${name}`.toLowerCase();
+  if (text.includes('app store discovery and engagement standard')) return 100;
+  if (text.includes('app downloads standard')) return 95;
+  if (text.includes('app store purchases standard')) return 90;
+  if (text.includes('app store installation and deletion standard')) return 85;
+  if (text.includes('app sessions standard')) return 80;
+  if (text.includes('app crashes')) return 75;
+  if (text.includes('subscription event report standard')) return 70;
+  if (text.includes('subscription state report standard')) return 65;
+  if (/app store|download|purchase|install|session|crash|engagement/.test(text) && text.includes('standard')) return 40;
+  return 1;
+}
+
+function pickRelevantAnalyticsReports(reports, args) {
   const scored = [];
   for (const report of reports) {
-    const attrs = report?.attributes && typeof report.attributes === 'object' ? report.attributes : {};
-    const name = String(attrs.name || '');
-    const category = String(attrs.category || '');
-    const text = `${category} ${name}`.toLowerCase();
-    let score = 0;
-    if (text.includes('app store discovery and engagement standard')) score = 100;
-    else if (text.includes('app downloads standard')) score = 95;
-    else if (text.includes('app store purchases standard')) score = 90;
-    else if (text.includes('app store installation and deletion standard')) score = 85;
-    else if (text.includes('app sessions standard')) score = 80;
-    else if (text.includes('app crashes')) score = 75;
-    else if (text.includes('subscription event report standard')) score = 70;
-    else if (text.includes('subscription state report standard')) score = 65;
-    else if (/app store|download|purchase|install|session|crash|engagement/.test(text) && text.includes('standard')) score = 40;
-    if (score > 0 && report.id) scored.push({ report, score });
+    if (report?.id) scored.push({ report, score: scoreAnalyticsReport(report) });
   }
-  return scored
+  const ordered = scored
     .sort((a, b) => b.score - a.score)
-    .slice(0, Math.max(1, Number(limit) || 8))
-    .map((entry) => entry.report);
+    .filter((entry) => args.analyticsReportScope === 'all' || entry.score > 1);
+  const limit = Math.max(0, Number(args.analyticsReportLimit) || 0);
+  return (limit > 0 ? ordered.slice(0, limit) : ordered).map((entry) => entry.report);
 }
 
 function pickBestReportInstance(instances, endDate) {
@@ -710,7 +798,8 @@ async function downloadAppleAnalyticsReportsDirect(appId, requestId, appCacheDir
     args.commandTimeoutMs,
   );
   if (!reportsResult.ok) return [];
-  const selectedReports = pickRelevantAnalyticsReports(reportsResult.items, args.analyticsInstanceLimit);
+  const selectedReports = pickRelevantAnalyticsReports(reportsResult.items, args);
+  warnings.push(`ASC App Analytics report catalog: selected ${selectedReports.length}/${reportsResult.items.length} report type(s) (${args.analyticsReportScope})`);
   const downloaded = [];
 
   for (const report of selectedReports) {
@@ -1243,6 +1332,8 @@ async function buildSingleAppSummary(appId, args) {
       outputPath: report.outputPath,
       rowCount: report.rows.length,
       cacheStatus: report.cacheStatus || null,
+      columns: reportColumns(report),
+      ...classifyReportColumns(report),
     })),
     maxSignals: args.maxSignals,
   });
