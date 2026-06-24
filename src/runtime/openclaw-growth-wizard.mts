@@ -986,10 +986,15 @@ function getWizardDefaultSourceCommand(sourceName) {
 function replaceLegacyRuntimeScriptCommand(command) {
   const trimmed = String(command || '').trim();
   if (!trimmed) return trimmed;
-  return trimmed.replace(
+  return trimmed
+    .replace(
     /^node\s+scripts\/(export-analytics-summary\.mjs|export-revenuecat-summary\.mjs|export-paddle-summary\.mjs|export-seo-summary\.mjs|export-sentry-summary\.mjs|export-coolify-summary\.mjs|export-asc-summary\.mjs|openclaw-growth-start\.mjs|openclaw-growth-status\.mjs|openclaw-growth-runner\.mjs|openclaw-growth-preflight\.mjs)(?=\s|$)/,
     (_match, scriptName) => nodeRuntimeScriptCommand(scriptName),
-  );
+    )
+    .replace(
+      /^node\s+(['"]?)(?:\S*\/)?node_modules\/@analyticscli\/growth-engineer\/dist\/runtime\/(export-analytics-summary\.mjs|export-revenuecat-summary\.mjs|export-paddle-summary\.mjs|export-seo-summary\.mjs|export-sentry-summary\.mjs|export-coolify-summary\.mjs|export-asc-summary\.mjs|openclaw-growth-start\.mjs|openclaw-growth-status\.mjs|openclaw-growth-runner\.mjs|openclaw-growth-preflight\.mjs)\1(?=\s|$)/,
+      (_match, _quote, scriptName) => nodeRuntimeScriptCommand(scriptName),
+    );
 }
 
 function sourceCommandNeedsActiveConfig(sourceName, command) {
