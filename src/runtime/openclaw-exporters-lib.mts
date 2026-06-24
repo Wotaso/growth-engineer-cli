@@ -841,7 +841,11 @@ export function buildAscSummary(input) {
     crashBreakdown.reduce((sum, entry) => sum + (coerceNumber(entry?.value) || 0), 0);
   const analyticsWarnings = Array.isArray(input?.analyticsWarnings) ? input.analyticsWarnings : [];
   const batchReports = Array.isArray(input?.batchReports) ? input.batchReports : [];
-  const analyticsWarningText = analyticsWarnings.map((warning) => String(warning)).join('\n').toLowerCase();
+  const analyticsWarningText = analyticsWarnings
+    .map((warning) => String(warning))
+    .filter((warning) => /analytics|batch report|sales report|sales batch|direct api|request listing|report segment/i.test(warning))
+    .join('\n')
+    .toLowerCase();
   const analyticsAuthBlocked =
     analyticsWarningText.includes('forbidden for security') ||
     analyticsWarningText.includes('api key in use does not allow this request') ||

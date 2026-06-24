@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { spawn } from 'node:child_process';
+import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -217,8 +218,16 @@ function envValue(name) {
   return normalizeString(process.env[name]);
 }
 
-function getAscAnalyticsFallbackEnv() {
+function getAscAuthCandidates() {
   const candidates = [
+    {
+      label: 'ASC',
+      keyId: envValue('ASC_KEY_ID'),
+      issuerId: envValue('ASC_ISSUER_ID'),
+      privateKeyPath: envValue('ASC_PRIVATE_KEY_PATH'),
+      privateKey: envValue('ASC_PRIVATE_KEY'),
+      privateKeyB64: envValue('ASC_PRIVATE_KEY_B64'),
+    },
     {
       label: 'ASC_ANALYTICS',
       keyId: envValue('ASC_ANALYTICS_KEY_ID'),
@@ -244,8 +253,16 @@ function getAscAnalyticsFallbackEnv() {
       privateKeyB64: envValue('ASC_BOOTSTRAP_PRIVATE_KEY_B64'),
     },
   ];
+  return candidates.filter((candidate) => (
+    candidate.keyId &&
+    candidate.issuerId &&
+    (candidate.privateKeyPath || candidate.privateKey || candidate.privateKeyB64)
+  ));
+}
+
+function getAscAnalyticsFallbackEnv() {
+  const candidates = getAscAuthCandidates().filter((candidate) => candidate.label !== 'ASC');
   for (const candidate of candidates) {
-    if (!candidate.keyId || !candidate.issuerId || (!candidate.privateKeyPath && !candidate.privateKey && !candidate.privateKeyB64)) continue;
     return {
       label: candidate.label,
       env: {
@@ -259,6 +276,104 @@ function getAscAnalyticsFallbackEnv() {
     };
   }
   return null;
+}
+
+function base64Url(value) {
+  return Buffer.from(typeof value === 'string' ? value : JSON.stringify(value)).toString('base64url');
+}
+
+async function readAscPrivateKey(candidate) {
+  if (candidate.privateKey) return candidate.privateKey;
+  if (candidate.privateKeyB64) return Buffer.from(candidate.privateKeyB64, 'base64').toString('utf8');
+  if (candidate.privateKeyPath) return fs.readFile(candidate.privateKeyPath, 'utf8');
+  throw new Error(`${candidate.label} private key is not configured`);
+}
+
+async function createAppleApiJwt(candidate) {
+  const privateKey = await readAscPrivateKey(candidate);
+  const issuedAt = Math.floor(Date.now() / 1000);
+  const header = { alg: 'ES256', kid: candidate.keyId, typ: 'JWT' };
+  const claims = {
+    iss: candidate.issuerId,
+    iat: issuedAt,
+    exp: issuedAt + 15 * 60,
+    aud: 'appstoreconnect-v1',
+  };
+  const signingInput = `${base64Url(header)}.${base64Url(claims)}`;
+  const signature = crypto
+    .sign('SHA256', Buffer.from(signingInput), { key: privateKey, dsaEncoding: 'ieee-p1363' })
+    .toString('base64url');
+  return `${signingInput}.${signature}`;
+}
+
+function isAppleApiAuthBlocked(error) {
+  return isAscAnalyticsAuthBlockedMessage(error instanceof Error ? error.message : String(error));
+}
+
+async function fetchWithTimeout(url, options: { timeoutMs?: number; headers?: Record<string, string> } = {}) {
+  const timeoutMs = Number.isFinite(Number(options.timeoutMs)) ? Number(options.timeoutMs) : 45_000;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, {
+      headers: options.headers,
+      signal: controller.signal,
+    });
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function appleApiRequest(candidate, pathOrUrl, options: { timeoutMs?: number; binary?: boolean } = {}) {
+  const url = String(pathOrUrl).startsWith('http')
+    ? String(pathOrUrl)
+    : `https://api.appstoreconnect.apple.com${pathOrUrl}`;
+  const token = await createAppleApiJwt(candidate);
+  const response = await fetchWithTimeout(url, {
+    timeoutMs: options.timeoutMs,
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  const body = Buffer.from(await response.arrayBuffer());
+  if (!response.ok) {
+    let message = body.toString('utf8').slice(0, 500);
+    try {
+      const parsed = JSON.parse(body.toString('utf8'));
+      if (Array.isArray(parsed.errors) && parsed.errors[0]) {
+        const error = parsed.errors[0];
+        message = `${error.status || response.status} ${error.code || ''} ${error.title || ''}: ${error.detail || ''}`.trim();
+      }
+    } catch {
+      // Use the raw body snippet.
+    }
+    throw new Error(`Apple API ${response.status} ${url}: ${message}`);
+  }
+  if (options.binary) return body;
+  try {
+    return JSON.parse(body.toString('utf8'));
+  } catch {
+    throw new Error(`Apple API returned non-JSON output for ${url}`);
+  }
+}
+
+async function appleApiRequestWithCandidates(label, pathOrUrl, warnings, options: { timeoutMs?: number; binary?: boolean } = {}) {
+  const candidates = getAscAuthCandidates();
+  if (candidates.length === 0) {
+    return { ok: false, payload: null, error: 'ASC API key is not configured for direct Apple API access', credential: null };
+  }
+  const errors = [];
+  for (const candidate of candidates) {
+    try {
+      const payload = await appleApiRequest(candidate, pathOrUrl, options);
+      return { ok: true, payload, error: null, credential: candidate.label };
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      errors.push(`${candidate.label}: ${detail}`);
+      if (!isAppleApiAuthBlocked(error)) break;
+    }
+  }
+  const error = errors.join('; ');
+  warnings.push(`${label}: ${error}`);
+  return { ok: false, payload: null, error, credential: null };
 }
 
 function isAscAnalyticsAuthBlockedMessage(value) {
@@ -490,6 +605,165 @@ async function writeReportManifest(paths, report) {
     )}\n`,
     'utf8',
   );
+}
+
+async function persistRawReport(label, paths, buffer, cacheStatus) {
+  await fs.mkdir(path.dirname(paths.rawPath), { recursive: true });
+  await fs.writeFile(paths.rawPath, buffer);
+  await materializeParsedReport(paths.rawPath, paths.parsedPath);
+  const rows = await parseDelimitedReport(paths.parsedPath);
+  const report = { label, outputPath: paths.parsedPath, rows, cacheStatus };
+  await writeReportManifest(paths, report);
+  return report;
+}
+
+async function downloadAppleSalesReportDirect(appCacheDir, baseName, args, warnings) {
+  const vendor = String(process.env.ASC_VENDOR_NUMBER || '').trim();
+  if (!vendor) return null;
+  const paths = reportCachePaths(appCacheDir, baseName);
+  if (!args.forceRefresh) {
+    const cached = await loadCachedReport('ASC daily sales batch report', paths);
+    if (cached) return cached;
+  }
+
+  const query = new URLSearchParams({
+    'filter[frequency]': 'DAILY',
+    'filter[reportDate]': args.end,
+    'filter[reportSubType]': 'SUMMARY',
+    'filter[reportType]': 'SALES',
+    'filter[vendorNumber]': vendor,
+  });
+  const result = await appleApiRequestWithCandidates(
+    'ASC daily sales batch report direct API',
+    `/v1/salesReports?${query.toString()}`,
+    warnings,
+    { timeoutMs: args.commandTimeoutMs, binary: true },
+  );
+  if (!result.ok || !Buffer.isBuffer(result.payload)) return null;
+  const report = await persistRawReport('ASC daily sales batch report', paths, result.payload, 'downloaded_direct_api');
+  warnings.push(`ASC daily sales batch report: downloaded with direct Apple API${result.credential ? ` (${result.credential})` : ''}`);
+  return report;
+}
+
+async function listAppleApiCollection(pathOrUrl, warnings, label, timeoutMs, limit = 200) {
+  const items = [];
+  let url = String(pathOrUrl);
+  while (url) {
+    const separator = url.includes('?') ? '&' : '?';
+    const pagedUrl = url.includes('limit=') ? url : `${url}${separator}limit=${limit}`;
+    const result = await appleApiRequestWithCandidates(label, pagedUrl, warnings, { timeoutMs });
+    if (!result.ok || !result.payload || typeof result.payload !== 'object') {
+      return { ok: false, items, error: result.error, credential: result.credential };
+    }
+    if (Array.isArray(result.payload.data)) items.push(...result.payload.data);
+    url = normalizeString(result.payload.links?.next) || '';
+  }
+  return { ok: true, items, error: null, credential: null };
+}
+
+function pickRelevantAnalyticsReports(reports, limit) {
+  const scored = [];
+  for (const report of reports) {
+    const attrs = report?.attributes && typeof report.attributes === 'object' ? report.attributes : {};
+    const name = String(attrs.name || '');
+    const category = String(attrs.category || '');
+    const text = `${category} ${name}`.toLowerCase();
+    let score = 0;
+    if (text.includes('app store discovery and engagement standard')) score = 100;
+    else if (text.includes('app downloads standard')) score = 95;
+    else if (text.includes('app store purchases standard')) score = 90;
+    else if (text.includes('app store installation and deletion standard')) score = 85;
+    else if (text.includes('app sessions standard')) score = 80;
+    else if (text.includes('app crashes')) score = 75;
+    else if (text.includes('subscription event report standard')) score = 70;
+    else if (text.includes('subscription state report standard')) score = 65;
+    else if (/app store|download|purchase|install|session|crash|engagement/.test(text) && text.includes('standard')) score = 40;
+    if (score > 0 && report.id) scored.push({ report, score });
+  }
+  return scored
+    .sort((a, b) => b.score - a.score)
+    .slice(0, Math.max(1, Number(limit) || 8))
+    .map((entry) => entry.report);
+}
+
+function pickBestReportInstance(instances, endDate) {
+  const withDate = instances
+    .map((instance) => ({
+      instance,
+      date: normalizeString(instance?.attributes?.processingDate) || '',
+    }))
+    .filter((entry) => entry.instance?.id);
+  const exact = withDate.find((entry) => entry.date === endDate);
+  if (exact) return exact.instance;
+  const before = withDate
+    .filter((entry) => entry.date && entry.date <= endDate)
+    .sort((a, b) => b.date.localeCompare(a.date))[0];
+  if (before) return before.instance;
+  return withDate.sort((a, b) => b.date.localeCompare(a.date))[0]?.instance || null;
+}
+
+async function downloadAppleAnalyticsReportsDirect(appId, requestId, appCacheDir, args, warnings) {
+  const reportsResult = await listAppleApiCollection(
+    `/v1/analyticsReportRequests/${encodeURIComponent(requestId)}/reports`,
+    warnings,
+    'ASC analytics reports direct API',
+    args.commandTimeoutMs,
+  );
+  if (!reportsResult.ok) return [];
+  const selectedReports = pickRelevantAnalyticsReports(reportsResult.items, args.analyticsInstanceLimit);
+  const downloaded = [];
+
+  for (const report of selectedReports) {
+    const attrs = report.attributes && typeof report.attributes === 'object' ? report.attributes : {};
+    const reportName = normalizeString(attrs.name) || report.id;
+    const instancesResult = await listAppleApiCollection(
+      `/v1/analyticsReports/${encodeURIComponent(report.id)}/instances`,
+      warnings,
+      `ASC analytics instances direct API ${reportName}`,
+      args.commandTimeoutMs,
+      20,
+    );
+    if (!instancesResult.ok || instancesResult.items.length === 0) continue;
+    const instance = pickBestReportInstance(instancesResult.items, args.end);
+    if (!instance?.id) continue;
+    const segmentsResult = await listAppleApiCollection(
+      `/v1/analyticsReportInstances/${encodeURIComponent(instance.id)}/segments`,
+      warnings,
+      `ASC analytics segments direct API ${reportName}`,
+      args.commandTimeoutMs,
+      20,
+    );
+    if (!segmentsResult.ok || segmentsResult.items.length === 0) continue;
+
+    let segmentIndex = 0;
+    for (const segment of segmentsResult.items) {
+      const segmentUrl = normalizeString(segment?.attributes?.url);
+      if (!segmentUrl) continue;
+      const paths = reportCachePaths(appCacheDir, `analytics-direct-${report.id}-${instance.id}-${segmentIndex}`);
+      if (!args.forceRefresh) {
+        const cached = await loadCachedReport(`ASC App Analytics ${reportName}`, paths);
+        if (cached) {
+          downloaded.push(cached);
+          segmentIndex += 1;
+          continue;
+        }
+      }
+      try {
+        const response = await fetchWithTimeout(segmentUrl, { timeoutMs: args.commandTimeoutMs });
+        if (!response.ok) throw new Error(`segment download failed with HTTP ${response.status}`);
+        const buffer = Buffer.from(await response.arrayBuffer());
+        downloaded.push(await persistRawReport(`ASC App Analytics ${reportName}`, paths, buffer, 'downloaded_direct_api'));
+      } catch (error) {
+        warnings.push(`ASC App Analytics ${reportName}: ${error instanceof Error ? error.message : String(error)}`);
+      }
+      segmentIndex += 1;
+    }
+  }
+
+  if (downloaded.length > 0) {
+    warnings.push(`ASC App Analytics batch report: downloaded ${downloaded.length} report segment(s) with direct Apple API`);
+  }
+  return downloaded;
 }
 
 async function loadCachedReportsFromDir(appCacheDir, warnings, reason) {
@@ -725,28 +999,42 @@ async function downloadBatchAnalyticsReports(appId, args, warnings) {
 
   const vendor = String(process.env.ASC_VENDOR_NUMBER || '').trim();
   if (vendor) {
-    const sales = await downloadAndParseReport(
-      'ASC daily sales batch report',
-      [
-        'analytics',
-        'sales',
-        '--vendor',
-        vendor,
-        '--type',
-        'SALES',
-        '--subtype',
-        'SUMMARY',
-        '--frequency',
-        'DAILY',
-        '--date',
-        args.end,
-      ],
-      appCacheDir,
-      'sales-daily',
-      args,
-      warnings,
-    );
+    const sales = await downloadAppleSalesReportDirect(appCacheDir, 'sales-daily', args, warnings) ||
+      await downloadAndParseReport(
+        'ASC daily sales batch report',
+        [
+          'analytics',
+          'sales',
+          '--vendor',
+          vendor,
+          '--type',
+          'SALES',
+          '--subtype',
+          'SUMMARY',
+          '--frequency',
+          'DAILY',
+          '--date',
+          args.end,
+        ],
+        appCacheDir,
+        'sales-daily',
+        args,
+        warnings,
+      );
     if (sales) reports.push(sales);
+  }
+
+  const directRequestsResult = await listAppleApiCollection(
+    `/v1/apps/${encodeURIComponent(appId)}/analyticsReportRequests`,
+    warnings,
+    'ASC analytics requests direct API',
+    args.commandTimeoutMs,
+    20,
+  );
+  const directRequestId = directRequestsResult.items.map(extractId).find(Boolean);
+  if (directRequestId) {
+    const directReports = await downloadAppleAnalyticsReportsDirect(appId, directRequestId, appCacheDir, args, warnings);
+    if (directReports.length > 0) return [...reports, ...directReports];
   }
 
   const requestsResult = await runBestEffortAscQueryResult('ASC analytics requests query', [
@@ -864,7 +1152,17 @@ function extractAscAppChoices(payload) {
 }
 
 async function listAscApps() {
-  const payload = await runJsonCommand('asc', ['apps', 'list', '--output', 'json']);
+  let payload = null;
+  try {
+    payload = await runJsonCommand('asc', ['apps', 'list', '--output', 'json']);
+  } catch (error) {
+    const warnings = [];
+    const direct = await listAppleApiCollection('/v1/apps', warnings, 'ASC apps direct API', 45_000);
+    if (!direct.ok) {
+      throw new Error(`${error instanceof Error ? error.message : String(error)}; direct Apple API fallback failed: ${direct.error || warnings.join('; ')}`);
+    }
+    payload = { data: direct.items };
+  }
   const apps = extractAscAppChoices(payload);
   if (apps.length === 0) {
     throw new Error('asc apps list returned no accessible apps');
@@ -874,6 +1172,7 @@ async function listAscApps() {
 
 async function buildSingleAppSummary(appId, args) {
   const warnings = [];
+  const metadataTimeoutMs = Math.min(Number(args.commandTimeoutMs) || 45_000, 8_000);
   const ratingsArgs = ['reviews', 'ratings', '--app', appId];
   if (args.country) {
     ratingsArgs.push('--country', args.country);
@@ -896,8 +1195,8 @@ async function buildSingleAppSummary(appId, args) {
       'builds,testflight,submission,review,appstore',
       '--output',
       'json',
-    ], warnings, { timeoutMs: args.commandTimeoutMs }),
-    runBestEffortAscQuery('ASC ratings query', ratingsArgs, warnings, { timeoutMs: args.commandTimeoutMs }),
+    ], warnings, { timeoutMs: metadataTimeoutMs }),
+    runBestEffortAscQuery('ASC ratings query', ratingsArgs, warnings, { timeoutMs: metadataTimeoutMs }),
     runBestEffortAscQuery('ASC review summarizations query', [
       'reviews',
       'summarizations',
@@ -911,7 +1210,7 @@ async function buildSingleAppSummary(appId, args) {
       'text,createdDate,locale',
       '--output',
       'json',
-    ], warnings, { timeoutMs: args.commandTimeoutMs }),
+    ], warnings, { timeoutMs: metadataTimeoutMs }),
     runBestEffortAscQuery('ASC beta feedback query', [
       'testflight',
       'feedback',
@@ -924,7 +1223,7 @@ async function buildSingleAppSummary(appId, args) {
       '-createdDate',
       '--output',
       'json',
-    ], warnings, { timeoutMs: args.commandTimeoutMs }),
+    ], warnings, { timeoutMs: metadataTimeoutMs }),
     downloadBatchAnalyticsReports(appId, args, warnings),
   ]);
   const batchRows = batchReports.flatMap((report) => report.rows);
