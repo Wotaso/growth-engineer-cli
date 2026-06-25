@@ -5,7 +5,7 @@ User-facing CLI for the AnalyticsCLI Growth Engineer workflow.
 Start setup from the app workspace on a VPS, Mac mini, or other host:
 
 ```bash
-npx -y @analyticscli/growth-engineer@preview wizard --connectors
+npx -y @analyticscli/growth-engineer wizard --connectors
 ```
 
 The wizard lets you choose connectors, intervals, output mode, and notification delivery. Connector secrets are collected only in the local terminal.

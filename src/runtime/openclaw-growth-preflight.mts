@@ -22,7 +22,7 @@ const DEFAULT_CONFIG_PATH = 'data/openclaw-growth-engineer/config.json';
 const DEFAULT_CONNECTION_TIMEOUT_MS = 15_000;
 const ASC_COMMAND_SMOKE_TIMEOUT_MS = 120_000;
 const RUNTIME_DIR = path.dirname(fileURLToPath(import.meta.url));
-const ANALYTICSCLI_PACKAGE_SPEC = process.env.ANALYTICSCLI_CLI_PACKAGE || '@analyticscli/cli@preview';
+const ANALYTICSCLI_PACKAGE_SPEC = process.env.ANALYTICSCLI_CLI_PACKAGE || '@analyticscli/cli';
 const ANALYTICSCLI_NPM_PREFIX =
   process.env.ANALYTICSCLI_NPM_PREFIX ||
   (process.env.HOME ? path.join(process.env.HOME, '.local') : path.join(process.cwd(), '.analyticscli-npm'));
@@ -901,7 +901,7 @@ async function testPaddleConnection(paddleToken, timeoutMs, environment = 'live'
 
 function describeAnalyticsConnectionFailure(detail, analyticsTokenEnv, hasAnalyticsToken) {
   if (!hasAnalyticsToken) {
-    return `AnalyticsCLI needs query access. Run \`npx -y @analyticscli/growth-engineer@preview wizard --connectors analytics\`, create or copy a readonly CLI token in dash.analyticscli.com -> API Keys, and paste it into the local terminal wizard. Raw error: ${detail}`;
+    return `AnalyticsCLI needs query access. Run \`npx -y @analyticscli/growth-engineer wizard --connectors analytics\`, create or copy a readonly CLI token in dash.analyticscli.com -> API Keys, and paste it into the local terminal wizard. Raw error: ${detail}`;
   }
 
   return `AnalyticsCLI connection failed with \`${analyticsTokenEnv}\` set. Verify that the pasted readonly CLI token is current and has project access. Raw error: ${detail}`;

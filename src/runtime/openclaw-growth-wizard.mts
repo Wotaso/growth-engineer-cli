@@ -31,7 +31,7 @@ const DEFAULT_CONNECTOR_HEALTH_INTERVAL_MINUTES = 360;
 const DEFAULT_SCHEDULER_PROOF_PATH = 'data/openclaw-growth-engineer/runtime/scheduler-proof.jsonl';
 const DELETE_SECRET = '__OPENCLAW_DELETE_SECRET__';
 const GROWTH_ENGINEER_PACKAGE_SPEC =
-  process.env.OPENCLAW_GROWTH_ENGINEER_PACKAGE || '@analyticscli/growth-engineer@preview';
+  process.env.OPENCLAW_GROWTH_ENGINEER_PACKAGE || '@analyticscli/growth-engineer';
 const RUNTIME_DIR = path.dirname(fileURLToPath(import.meta.url));
 const HEARTBEAT_MARKER_START = '<!-- openclaw-growth-engineer:start -->';
 const HEARTBEAT_MARKER_END = '<!-- openclaw-growth-engineer:end -->';
@@ -912,8 +912,8 @@ function printHelpAndExit(exitCode, reason = null) {
 OpenClaw Growth Setup Wizard
 
 Usage:
-  npx -y @analyticscli/growth-engineer@preview wizard [--out <config-path>]
-  npx -y @analyticscli/growth-engineer@preview wizard --connectors [${CONNECTOR_KEYS.join(',')}]
+  npx -y @analyticscli/growth-engineer wizard [--out <config-path>]
+  npx -y @analyticscli/growth-engineer wizard --connectors [${CONNECTOR_KEYS.join(',')}]
 
 Compatibility note:
   Existing cron/heartbeat runners may still execute generated runtime scripts, but user-facing setup and connector repair should use the npx command above.
@@ -4469,9 +4469,10 @@ async function cleanupTemporaryAscBootstrapPrivateKey(bootstrapEnv: Record<strin
 
 function printAscBootstrapAdminRevokeNotice(bootstrapEnv: Record<string, string> = {}) {
   const keyId = String(bootstrapEnv.ASC_BOOTSTRAP_KEY_ID || '').trim();
-  const keyLabel = keyId ? `Admin key ${keyId}` : 'the temporary Admin key';
-  process.stdout.write(`\n${bold(`Revoke ${keyLabel} in App Store Connect now.`)}\n`);
-  process.stdout.write('https://appstoreconnect.apple.com/access/integrations/api\n');
+  const keyLabel = keyId ? `Admin key ${keyId}` : 'temporary Admin key';
+  process.stdout.write(`\n${bold(`IMPORTANT: Revoke the ASC ${keyLabel} now.`)}\n`);
+  process.stdout.write('Growth Engineer only needed this Admin key once for setup. The Reports key is used from now on.\n');
+  process.stdout.write('App Store Connect API keys: https://appstoreconnect.apple.com/access/integrations/api\n');
 }
 
 async function writeSelfUpdateState(workspaceRoot, value) {
@@ -5986,7 +5987,7 @@ async function writeOpenClawJobManifest(configPath, config) {
       openClawCanEditOutputDelivery: true,
       openClawCanEditConnectors: true,
       openClawCanEditConnectorSecrets: false,
-      connectorChanges: 'OpenClaw may read and modify non-secret connector config such as enabled flags, source commands, project/app mappings, and source priorities. Use `npx -y @analyticscli/growth-engineer@preview wizard --connectors` for API keys or other connector secrets; never write secret values into config files, manifests, issues, PRs, or chat output.',
+      connectorChanges: 'OpenClaw may read and modify non-secret connector config such as enabled flags, source commands, project/app mappings, and source priorities. Use `npx -y @analyticscli/growth-engineer wizard --connectors` for API keys or other connector secrets; never write secret values into config files, manifests, issues, PRs, or chat output.',
       secretAccessMode: config?.security?.connectorSecrets?.mode || 'local-user-file',
       secretPolicy: config?.security?.connectorSecrets?.mode === 'isolated-runner'
         ? 'OpenClaw must use the allowlisted sudo wrapper commands and must not read the persisted secret file.'

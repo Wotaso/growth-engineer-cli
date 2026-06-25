@@ -28,7 +28,7 @@ const DEFAULT_HEARTBEAT_PATH = 'HEARTBEAT.md';
 const DEFAULT_SCHEDULER_PROOF_PATH = 'data/openclaw-growth-engineer/runtime/scheduler-proof.jsonl';
 const HEARTBEAT_MARKER_START = '<!-- openclaw-growth-engineer:start -->';
 const HEARTBEAT_MARKER_END = '<!-- openclaw-growth-engineer:end -->';
-const ANALYTICSCLI_PACKAGE_SPEC = process.env.ANALYTICSCLI_CLI_PACKAGE || '@analyticscli/cli@preview';
+const ANALYTICSCLI_PACKAGE_SPEC = process.env.ANALYTICSCLI_CLI_PACKAGE || '@analyticscli/cli';
 const ANALYTICSCLI_NPM_PREFIX =
   process.env.ANALYTICSCLI_NPM_PREFIX ||
   (process.env.HOME ? path.join(process.env.HOME, '.local') : path.join(process.cwd(), '.analyticscli-npm'));
@@ -843,7 +843,7 @@ function renderHeartbeatBlock(configPath, config) {
   const displayStatePath = deriveStatePathFromConfigPath(displayConfigPath);
   const runnerCommand = buildGrowthRunnerCommand(displayConfigPath, displayStatePath);
   const statusCommand = `node scripts/openclaw-growth-status.mjs --config ${quote(displayConfigPath)} --json --only-connectors asc`;
-  const wizardCommand = 'npx -y @analyticscli/growth-engineer@preview wizard --connectors';
+  const wizardCommand = 'npx -y @analyticscli/growth-engineer wizard --connectors';
   return `${HEARTBEAT_MARKER_START}
 tasks:
 
@@ -2305,7 +2305,7 @@ async function buildProjectSelectionResponse({ configCreated, configPath, projec
 
 function remediationForCheck(checkName, configPath) {
   if (checkName === 'dependency:analyticscli') {
-    return 'Run AnalyticsCLI CLI with `npx -y @analyticscli/cli@preview --help`, or use `@analyticscli/cli` after stable release.';
+    return 'Run AnalyticsCLI CLI with `npx -y @analyticscli/cli --help`, or use `@analyticscli/cli` after stable release.';
   }
   if (checkName === 'project:github-repo') {
     return `Set \`project.githubRepo\` in ${configPath} (owner/repo).`;
@@ -2317,7 +2317,7 @@ function remediationForCheck(checkName, configPath) {
     return 'Write `data/openclaw-growth-engineer/analytics_summary.json` via your analytics refresh step (API-key based source command/file generation).';
   }
   if (checkName === 'connection:analytics') {
-    return 'Run `npx -y @analyticscli/growth-engineer@preview wizard --connectors analytics` and paste a fresh AnalyticsCLI readonly CLI token into the local terminal wizard.';
+    return 'Run `npx -y @analyticscli/growth-engineer wizard --connectors analytics` and paste a fresh AnalyticsCLI readonly CLI token into the local terminal wizard.';
   }
   if (checkName === 'connection:github') {
     return 'Verify `GITHUB_TOKEN` and repo access to `/repos/<owner>/<repo>` + issues API.';

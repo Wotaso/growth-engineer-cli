@@ -781,7 +781,7 @@ function buildConnectorWizardCommand(configPath, entry) {
   const connector = connectorWizardKey(entry.key);
   if (!connector) return null;
   const configArg = configPath ? ` --config ${quote(configPath)}` : '';
-  return `npx -y @analyticscli/growth-engineer@preview wizard${configArg} --connectors ${quote(connector)}`;
+  return `npx -y @analyticscli/growth-engineer wizard${configArg} --connectors ${quote(connector)}`;
 }
 
 function conciseConnectorDetail(entry) {

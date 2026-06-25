@@ -59,8 +59,8 @@ type IssueDraftPayload = {
 const moduleDir = dirname(fileURLToPath(import.meta.url));
 const packageRoot = resolve(moduleDir, '..');
 const localAnalyticsCliDir = resolve(packageRoot, '../cli');
-const analyticsCliPackageSpec = process.env.ANALYTICSCLI_CLI_PACKAGE || '@analyticscli/cli@preview';
-const growthEngineerPackageSpec = process.env.OPENCLAW_GROWTH_ENGINEER_PACKAGE || '@analyticscli/growth-engineer@preview';
+const analyticsCliPackageSpec = process.env.ANALYTICSCLI_CLI_PACKAGE || '@analyticscli/cli';
+const growthEngineerPackageSpec = process.env.OPENCLAW_GROWTH_ENGINEER_PACKAGE || '@analyticscli/growth-engineer';
 const analyticsCliNpmPrefix =
   process.env.ANALYTICSCLI_NPM_PREFIX ||
   (process.env.HOME ? join(process.env.HOME, '.local') : resolve(process.cwd(), '.analyticscli-npm'));
@@ -656,7 +656,7 @@ const runSharedAnalyticsSetup = (): { ok: boolean; detail: string } => {
     return interpretSetupResult(result, 'analyticscli setup finished');
   }
 
-  const result = runCommand('npx', ['-y', '@analyticscli/cli@preview', ...sharedArgs], {
+  const result = runCommand('npx', ['-y', '@analyticscli/cli', ...sharedArgs], {
     timeoutMs: 10 * 60_000,
   });
   return interpretSetupResult(result, 'analyticscli preview setup finished');
@@ -999,7 +999,7 @@ const installConnectorHelpers = async (
         connector: 'coolify',
         ok: true,
         detail:
-          'Coolify is configured through the npx wizard connector flow; create a read-only API token in Coolify Keys & Tokens / API tokens, then run `npx -y @analyticscli/growth-engineer@preview wizard --connectors coolify` to store COOLIFY_BASE_URL and COOLIFY_API_TOKEN locally',
+          'Coolify is configured through the npx wizard connector flow; create a read-only API token in Coolify Keys & Tokens / API tokens, then run `npx -y @analyticscli/growth-engineer wizard --connectors coolify` to store COOLIFY_BASE_URL and COOLIFY_API_TOKEN locally',
       };
     }
     if (connector === 'paddle') {
@@ -1007,7 +1007,7 @@ const installConnectorHelpers = async (
         connector: 'paddle',
         ok: true,
         detail:
-          'Paddle is configured through the npx wizard connector flow; create a live Paddle API key at https://vendors.paddle.com/authentication-v2 with metrics.read minimum, preferably all available read-only (*.read) permissions and no write permissions, then run `npx -y @analyticscli/growth-engineer@preview wizard --connectors paddle` to store PADDLE_API_KEY locally',
+          'Paddle is configured through the npx wizard connector flow; create a live Paddle API key at https://vendors.paddle.com/authentication-v2 with metrics.read minimum, preferably all available read-only (*.read) permissions and no write permissions, then run `npx -y @analyticscli/growth-engineer wizard --connectors paddle` to store PADDLE_API_KEY locally',
       };
     }
     if (connector === 'seo') {

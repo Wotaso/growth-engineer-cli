@@ -67,7 +67,7 @@
     "coolify": {
       "enabled": false,
       "mode": "command",
-      "command": "npx -y @analyticscli/growth-engineer@preview exporters coolify-summary --config data/openclaw-growth-engineer/config.json",
+      "command": "npx -y @analyticscli/growth-engineer exporters coolify-summary --config data/openclaw-growth-engineer/config.json",
       "baseUrl": "https://coolify.example.com",
       "tokenEnv": "COOLIFY_API_TOKEN"
     },

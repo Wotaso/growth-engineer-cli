@@ -11,7 +11,7 @@ import { applyOpenClawSecretRefs, loadOpenClawGrowthSecrets } from './openclaw-g
 const DEFAULT_CONFIG_PATH = 'data/openclaw-growth-engineer/config.json';
 const DEFAULT_TIMEOUT_MS = 15_000;
 const RUNTIME_DIR = path.dirname(fileURLToPath(import.meta.url));
-const WIZARD_COMMAND = 'npx -y @analyticscli/growth-engineer@preview wizard';
+const WIZARD_COMMAND = 'npx -y @analyticscli/growth-engineer wizard';
 
 type ShellResult = {
   ok: boolean;
