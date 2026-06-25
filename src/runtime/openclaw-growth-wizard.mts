@@ -4611,6 +4611,7 @@ async function runConnectorSetupSteps({
   let sentryAccounts: any[] = [];
   let paddleAccounts: any[] = [];
   let coolifyConfig: any = null;
+  let ascBootstrapRevokeEnv: Record<string, string> | null = null;
   if (selected.includes('analytics')) {
     let forceFreshAnalyticsToken = shouldForceFreshAnalyticsToken(healthByConnector);
     while (true) {
@@ -4724,7 +4725,7 @@ async function runConnectorSetupSteps({
 
       await cleanupTemporaryAscBootstrapPrivateKey(bootstrapEnv);
       if (check.ok) {
-        printAscBootstrapAdminRevokeNotice(bootstrapEnv);
+        ascBootstrapRevokeEnv = bootstrapEnv;
       }
       if (!check.retry) break;
     }
@@ -4822,6 +4823,9 @@ async function runConnectorSetupSteps({
     printSetupSuccess(setupPayload);
     if (wroteSecrets) {
       process.stdout.write('Future OpenClaw Growth commands load this secrets file automatically.\n');
+    }
+    if (ascBootstrapRevokeEnv) {
+      printAscBootstrapAdminRevokeNotice(ascBootstrapRevokeEnv);
     }
     await maybeRefreshOpenClawSessionInstructions(rl, args.config);
     const configureIsolation = allowIsolationPrompt && ENABLE_ISOLATED_SECRET_RUNNER_WIZARD && await askYesNo(
